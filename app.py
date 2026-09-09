@@ -1,659 +1,2098 @@
-"""
-PF ECR Converter - Web Interface (Single File Version)
-Features:
-  1. Convert ECR PDF to Excel (with OCR support for rotated PDFs)
-  2. Convert Excel to CSV
-
-Usage:
-    1. Install dependencies: pip3 install flask pdfplumber openpyxl pandas pymupdf pytesseract pillow
-    2. Install Tesseract OCR: 
-       - Mac: brew install tesseract
-       - Ubuntu: sudo apt-get install tesseract-ocr
-    3. Run: python3 pf_ecr_web_app.py
-    4. Open browser: http://localhost:5000
-"""
-
-from flask import Flask, request, make_response
-import pdfplumber
-from openpyxl import Workbook
-from openpyxl.styles import Font, Alignment
+import streamlit as st
 import pandas as pd
-import re
-import os
-import tempfile
-from werkzeug.utils import secure_filename
+import random
+import string
+from datetime import date, datetime
+from pathlib import Path
 
-# OCR imports (optional - for rotated PDFs)
-try:
-    import fitz  # PyMuPDF
-    import pytesseract
-    from PIL import Image
-    import io
-    OCR_AVAILABLE = True
-except ImportError:
-    OCR_AVAILABLE = False
+# ============================================================
+# EPFO EMPLOYER PORTAL — TRAINING DEMO
+# ============================================================
 
-app = Flask(__name__)
-app.secret_key = 'pf_ecr_converter_secret_key_2025'
+st.set_page_config(
+    page_title="EPFO Employer Portal — Training Demo",
+    page_icon="🏢",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
 
-# Health check route
-@app.route('/health')
-def health():
-    return 'OK', 200
+# -----------------------------
+# Session state
+# -----------------------------
 
-# Embedded HTML template
-HTML_TEMPLATE = '''<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>PF ECR Converter</title>
-    <style>
-        * { margin: 0; padding: 0; box-sizing: border-box; }
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            min-height: 100vh;
-            display: flex;
-            justify-content: center;
-            align-items: center;
-            padding: 20px;
-        }
-        .container {
-            background: white;
-            border-radius: 20px;
-            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
-            padding: 40px;
-            max-width: 550px;
-            width: 100%;
-        }
-        h1 { color: #333; text-align: center; margin-bottom: 10px; font-size: 24px; }
-        .subtitle { color: #666; text-align: center; margin-bottom: 25px; font-size: 14px; }
-        
-        .tabs {
-            display: flex;
-            margin-bottom: 25px;
-            border-radius: 10px;
-            overflow: hidden;
-            border: 2px solid #667eea;
-        }
-        .tab {
-            flex: 1;
-            padding: 12px 20px;
-            text-align: center;
-            cursor: pointer;
-            background: white;
-            color: #667eea;
-            font-weight: 600;
-            font-size: 14px;
-            transition: all 0.3s ease;
-            border: none;
-        }
-        .tab:first-child { border-right: 1px solid #667eea; }
-        .tab.active {
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white;
-        }
-        .tab:hover:not(.active) { background: #f0f2ff; }
-        
-        .tab-content { display: none; }
-        .tab-content.active { display: block; }
-        
-        .upload-area {
-            border: 2px dashed #667eea;
-            border-radius: 15px;
-            padding: 35px 20px;
-            text-align: center;
-            cursor: pointer;
-            transition: all 0.3s ease;
-            background: #f8f9ff;
-            margin-bottom: 20px;
-        }
-        .upload-area:hover { border-color: #764ba2; background: #f0f2ff; }
-        .upload-area.dragover { border-color: #764ba2; background: #e8ebff; }
-        .upload-icon { font-size: 42px; margin-bottom: 12px; }
-        .upload-text { color: #333; font-size: 15px; margin-bottom: 6px; }
-        .upload-hint { color: #888; font-size: 12px; }
-        input[type="file"] { display: none; }
-        
-        .file-name {
-            background: #e8ebff;
-            padding: 12px 20px;
-            border-radius: 10px;
-            margin-bottom: 20px;
-            display: none;
-            align-items: center;
-            justify-content: space-between;
-        }
-        .file-name.show { display: flex; }
-        .file-name span { color: #333; font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-        .file-name button { background: none; border: none; color: #e74c3c; cursor: pointer; font-size: 18px; padding: 0 5px; }
-        
-        .convert-btn {
-            width: 100%;
-            padding: 14px;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white;
-            border: none;
-            border-radius: 10px;
-            font-size: 15px;
-            font-weight: 600;
-            cursor: pointer;
-            transition: transform 0.2s, box-shadow 0.2s;
-        }
-        .convert-btn:hover { transform: translateY(-2px); box-shadow: 0 5px 20px rgba(102, 126, 234, 0.4); }
-        .convert-btn:disabled { background: #ccc; cursor: not-allowed; transform: none; box-shadow: none; }
-        
-        .alert { padding: 12px 20px; border-radius: 10px; margin-bottom: 20px; font-size: 14px; }
-        .alert-error { background: #ffe8e8; color: #e74c3c; border: 1px solid #f5c6c6; }
-        .alert-success { background: #e8ffe8; color: #27ae60; border: 1px solid #c6f5c6; }
-        
-        .features { margin-top: 25px; padding-top: 20px; border-top: 1px solid #eee; }
-        .features h3 { color: #333; font-size: 13px; margin-bottom: 12px; }
-        .features ul { list-style: none; color: #666; font-size: 12px; }
-        .features li { padding: 4px 0; padding-left: 18px; position: relative; }
-        .features li::before { content: "✓"; position: absolute; left: 0; color: #27ae60; font-size: 11px; }
-        
-        .loading { display: none; text-align: center; padding: 20px; }
-        .loading.show { display: block; }
-        .spinner {
-            border: 3px solid #f3f3f3;
-            border-top: 3px solid #667eea;
-            border-radius: 50%;
-            width: 36px;
-            height: 36px;
-            animation: spin 1s linear infinite;
-            margin: 0 auto 12px;
-        }
-        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
-    </style>
-</head>
-<body>
-    <div class="container">
-        <h1>📄 PF ECR Converter</h1>
-        <p class="subtitle">Convert your PF ECR files easily</p>
-        
-        <div class="tabs">
-            <button class="tab active" onclick="switchTab('pdf-to-excel', this)">PDF → Excel</button>
-            <button class="tab" onclick="switchTab('excel-to-csv', this)">Excel → CSV</button>
+def init_state():
+    defaults = {
+        "logged_in": False,
+        "username": "",
+        "company": {
+            "name": "ABC Technologies Pvt. Ltd.",
+            "code": "DLCPM0001234000",
+            "pan": "ABCDE1234F",
+            "address": "Cyber City, Gurugram, Haryana",
+            "constitution": "Private Limited Company",
+            "status": "Active",
+            "mobile": "98XXXXXX10",
+            "email": "demo@abctech.example",
+        },
+        "employees": [
+            {
+                "member_id": "DLCPM00012340000001",
+                "name": "Rahul Sharma",
+                "dob": "1995-04-12",
+                "gender": "Male",
+                "doj": "2024-04-01",
+                "doe": "",
+                "reason": "",
+                "uan": "100000000001",
+                "basic": 30000,
+                "epf_wages": 15000,
+                "eps_wages": 15000,
+                "edli_wages": 15000,
+                "aadhaar": "Verified",
+                "pan": "Verified",
+                "bank": "Verified",
+                "kyc": "Approved",
+                "status": "Active",
+            },
+            {
+                "member_id": "DLCPM00012340000002",
+                "name": "Priya Verma",
+                "dob": "1997-09-21",
+                "gender": "Female",
+                "doj": "2024-06-10",
+                "doe": "",
+                "reason": "",
+                "uan": "100000000002",
+                "basic": 30000,
+                "epf_wages": 15000,
+                "eps_wages": 15000,
+                "edli_wages": 15000,
+                "aadhaar": "Pending",
+                "pan": "Verified",
+                "bank": "Pending",
+                "kyc": "Pending",
+                "status": "Active",
+            },
+        ],
+        "ecr": [],
+        "challans": [],
+        "notices": [],
+        "corrections": [],
+        "logs": [],
+    }
+
+    for k, v in defaults.items():
+        if k not in st.session_state:
+            st.session_state[k] = v
+
+
+init_state()
+
+
+# ============================================================
+# Helpers
+# ============================================================
+
+def money(value):
+    return f"₹{float(value):,.2f}"
+
+
+def generate_uan():
+    return "".join(random.choices(string.digits, k=12))
+
+
+def generate_trrn():
+    return "TRRN" + "".join(random.choices(string.digits, k=12))
+
+
+def generate_member_id():
+    company_code = st.session_state.company["code"]
+    suffix = "".join(random.choices(string.digits, k=8))
+    return f"{company_code}{suffix}"
+
+
+def add_log(message):
+    st.session_state.logs.insert(
+        0,
+        {
+            "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "activity": message,
+        },
+    )
+
+
+def calc_contribution(basic):
+    """
+    Demo calculation only.
+
+    Employee EPF = 12% of EPF wages
+    Employer EPF = 3.67%
+    EPS = 8.33%
+    EDLI = 0.5%
+
+    This is a training calculation and should NOT be treated
+    as official statutory calculation for actual filing.
+    """
+    epf_wages = min(float(basic), 15000)
+    eps_wages = min(float(basic), 15000)
+    edli_wages = min(float(basic), 15000)
+
+    employee = round(epf_wages * 0.12, 2)
+    eps = round(eps_wages * 0.0833, 2)
+    employer_epf = round(eps_wages * 0.0367, 2)
+    edli = round(edli_wages * 0.005, 2)
+
+    employer_total = round(employer_epf + eps, 2)
+
+    return {
+        "epf_wages": epf_wages,
+        "eps_wages": eps_wages,
+        "edli_wages": edli_wages,
+        "employee": employee,
+        "employer_epf": employer_epf,
+        "eps": eps,
+        "edli": edli,
+        "employer_total": employer_total,
+        "total": round(employee + employer_total + edli, 2),
+    }
+
+
+def employee_dataframe():
+    if not st.session_state.employees:
+        return pd.DataFrame()
+
+    rows = []
+
+    for e in st.session_state.employees:
+        c = calc_contribution(e["basic"])
+
+        rows.append(
+            {
+                "Member ID": e["member_id"],
+                "Name": e["name"],
+                "UAN": e["uan"],
+                "DOJ": e["doj"],
+                "DOE": e["doe"],
+                "Basic": e["basic"],
+                "EPF Wages": c["epf_wages"],
+                "Employee PF": c["employee"],
+                "Employer PF": c["employer_total"],
+                "KYC": e["kyc"],
+                "Status": e["status"],
+            }
+        )
+
+    return pd.DataFrame(rows)
+
+
+def csv_download(df):
+    return df.to_csv(index=False).encode("utf-8")
+
+
+# ============================================================
+# Login
+# ============================================================
+
+if not st.session_state.logged_in:
+
+    st.markdown(
+        """
+        <div style="
+            background:linear-gradient(90deg,#064e3b,#047857);
+            padding:25px;
+            border-radius:12px;
+            color:white;
+            text-align:center;
+        ">
+            <h1>🏢 EPFO Employer Portal</h1>
+            <p style="font-size:18px;">
+                Training / Simulation Environment
+            </p>
         </div>
-        
-        {{ERROR_MESSAGE}}
+        """,
+        unsafe_allow_html=True,
+    )
 
-        <div class="tab-content active" id="pdf-to-excel">
-            <form method="POST" enctype="multipart/form-data" id="pdfForm">
-                <input type="hidden" name="conversion_type" value="pdf_to_excel">
-                <div class="upload-area" id="dropZone1">
-                    <div class="upload-icon">📑</div>
-                    <p class="upload-text">Click to upload or drag & drop</p>
-                    <p class="upload-hint">ECR PDF files only</p>
-                    <input type="file" name="file" id="fileInput1" accept=".pdf">
-                </div>
-                <div class="file-name" id="fileName1">
-                    <span id="fileNameText1"></span>
-                    <button type="button" onclick="clearFile(1)">✕</button>
-                </div>
-                <div class="loading" id="loading1">
-                    <div class="spinner"></div>
-                    <p>Converting PDF to Excel...</p>
-                </div>
-                <button type="submit" class="convert-btn" id="convertBtn1" disabled>Convert to Excel</button>
-            </form>
-            <div class="features">
-                <h3>PDF to Excel features:</h3>
-                <ul>
-                    <li>Extracts member data from ECR PDF</li>
-                    <li>Supports both normal and rotated PDFs</li>
-                    <li>Removes name columns (ECR & UAN Repository)</li>
-                    <li>Cleans numeric formatting</li>
-                </ul>
-            </div>
-        </div>
+    st.warning(
+        "DEMO ONLY — This application is not connected to EPFO. "
+        "Do not enter real EPFO passwords, OTPs, Aadhaar, PAN or bank details."
+    )
 
-        <div class="tab-content" id="excel-to-csv">
-            <form method="POST" enctype="multipart/form-data" id="excelForm">
-                <input type="hidden" name="conversion_type" value="excel_to_csv">
-                <div class="upload-area" id="dropZone2">
-                    <div class="upload-icon">📊</div>
-                    <p class="upload-text">Click to upload or drag & drop</p>
-                    <p class="upload-hint">Excel files (.xlsx, .xls) only</p>
-                    <input type="file" name="file" id="fileInput2" accept=".xlsx,.xls">
-                </div>
-                <div class="file-name" id="fileName2">
-                    <span id="fileNameText2"></span>
-                    <button type="button" onclick="clearFile(2)">✕</button>
-                </div>
-                <div class="loading" id="loading2">
-                    <div class="spinner"></div>
-                    <p>Converting Excel to CSV...</p>
-                </div>
-                <button type="submit" class="convert-btn" id="convertBtn2" disabled>Convert to CSV</button>
-            </form>
-            <div class="features">
-                <h3>Excel to CSV features:</h3>
-                <ul>
-                    <li>Converts Excel (.xlsx, .xls) to CSV</li>
-                    <li>Removes commas from numbers</li>
-                    <li>UTF-8 encoding for proper character support</li>
-                    <li>Compatible with any spreadsheet software</li>
-                </ul>
-            </div>
-        </div>
+    st.markdown("### Employer Login")
+
+    col1, col2, col3 = st.columns([1, 2, 1])
+
+    with col2:
+        username = st.text_input(
+            "Employer User ID",
+            value="DEMOEMP001",
+        )
+
+        password = st.text_input(
+            "Password",
+            type="password",
+            value="demo123",
+        )
+
+        captcha = st.text_input(
+            "Captcha",
+            value="DEMO",
+        )
+
+        st.caption("Demo credentials: DEMOEMP001 / demo123 / DEMO")
+
+        if st.button(
+            "🔐 Login",
+            type="primary",
+            use_container_width=True,
+        ):
+            if username == "DEMOEMP001" and password == "demo123":
+                st.session_state.logged_in = True
+                st.session_state.username = username
+                add_log("Employer logged in")
+                st.rerun()
+            else:
+                st.error("Invalid demo credentials.")
+
+        c1, c2 = st.columns(2)
+
+        with c1:
+            if st.button("Forgot Password"):
+                st.info("Demo: Password reset workflow opened.")
+
+        with c2:
+            if st.button("Account Unlock"):
+                st.info("Demo: Account unlock request created.")
+
+    st.stop()
+
+
+# ============================================================
+# Sidebar
+# ============================================================
+
+company = st.session_state.company
+
+st.sidebar.markdown(
+    """
+    <div style="
+        background:#064e3b;
+        color:white;
+        padding:15px;
+        border-radius:10px;
+        text-align:center;
+    ">
+        <h3>EPFO Employer</h3>
+        <small>Training Demo</small>
     </div>
+    """,
+    unsafe_allow_html=True,
+)
 
-    <script>
-        function switchTab(tabId, btn) {
-            document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
-            document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
-            document.getElementById(tabId).classList.add('active');
-            btn.classList.add('active');
-        }
+st.sidebar.write(f"**Establishment:** {company['code']}")
+st.sidebar.write(f"**Employer:** {st.session_state.username}")
 
-        function setupForm(num) {
-            const dropZone = document.getElementById('dropZone' + num);
-            const fileInput = document.getElementById('fileInput' + num);
-            const fileName = document.getElementById('fileName' + num);
-            const fileNameText = document.getElementById('fileNameText' + num);
-            const convertBtn = document.getElementById('convertBtn' + num);
-            const form = document.getElementById(num === 1 ? 'pdfForm' : 'excelForm');
-            const loading = document.getElementById('loading' + num);
+menu = st.sidebar.radio(
+    "MENU",
+    [
+        "🏠 Dashboard",
+        "1️⃣ Establishment Registration",
+        "2️⃣ Employer Login",
+        "3️⃣ Establishment / Profile",
+        "4️⃣ Employee / Member",
+        "5️⃣ KYC",
+        "6️⃣ UAN Management",
+        "7️⃣ Salary / Contribution",
+        "8️⃣ ECR Filing",
+        "9️⃣ ECR Errors",
+        "🔟 Challan / TRRN",
+        "1️⃣1️⃣ Payment Reconciliation",
+        "1️⃣2️⃣ Employee Exit",
+        "1️⃣3️⃣ Transfer / Previous Employment",
+        "1️⃣4️⃣ Online Services",
+        "1️⃣5️⃣ Compliance Dashboard",
+        "1️⃣6️⃣ Downloads",
+        "1️⃣7️⃣ Reports",
+        "1️⃣8️⃣ Corrections",
+        "1️⃣9️⃣ Notices / e-Proceedings",
+        "2️⃣0️⃣ Special Modules",
+        "⚙️ Settings / Reset",
+    ],
+)
 
-            dropZone.addEventListener('click', () => fileInput.click());
-            
-            fileInput.addEventListener('change', () => {
-                if (fileInput.files.length > 0) {
-                    fileNameText.textContent = fileInput.files[0].name;
-                    fileName.classList.add('show');
-                    convertBtn.disabled = false;
-                }
-            });
-
-            dropZone.addEventListener('dragover', (e) => { e.preventDefault(); dropZone.classList.add('dragover'); });
-            dropZone.addEventListener('dragleave', () => { dropZone.classList.remove('dragover'); });
-            dropZone.addEventListener('drop', (e) => {
-                e.preventDefault();
-                dropZone.classList.remove('dragover');
-                const files = e.dataTransfer.files;
-                if (files.length > 0) {
-                    fileInput.files = files;
-                    fileNameText.textContent = files[0].name;
-                    fileName.classList.add('show');
-                    convertBtn.disabled = false;
-                }
-            });
-
-            form.addEventListener('submit', () => {
-                loading.classList.add('show');
-                convertBtn.disabled = true;
-                dropZone.style.display = 'none';
-                fileName.style.display = 'none';
-            });
-        }
-
-        function clearFile(num) {
-            document.getElementById('fileInput' + num).value = '';
-            document.getElementById('fileName' + num).classList.remove('show');
-            document.getElementById('convertBtn' + num).disabled = true;
-        }
-
-        setupForm(1);
-        setupForm(2);
-    </script>
-</body>
-</html>'''
+if st.sidebar.button("🚪 Logout", use_container_width=True):
+    st.session_state.logged_in = False
+    st.session_state.username = ""
+    st.rerun()
 
 
-def clean_number(value):
-    """Remove commas, newlines, and stray characters, then convert to integer if numeric."""
-    if value is None:
-        return value
-    value = str(value).strip()
-    
-    has_hash_prefix = value.startswith('#')
-    if has_hash_prefix:
-        value = value[1:].strip()
-    
-    value = re.sub(r'\n.*$', '', value)
-    value = re.sub(r'^[^\d-]+', '', value)
-    value = re.sub(r'[^\d]+$', '', value)
-    value = value.strip()
-    cleaned = value.replace(',', '')
-    
-    try:
-        num_value = int(cleaned)
-        if has_hash_prefix:
-            return f"# {num_value:,}"
-        return num_value
-    except ValueError:
-        if has_hash_prefix:
-            return f"# {value}"
-        return value
+# ============================================================
+# Header
+# ============================================================
+
+st.title("EPFO Employer Portal")
+st.caption(
+    "Training & Simulation Demo • Dummy Data • Not connected to EPFO"
+)
+
+st.divider()
 
 
-def extract_ecr_data_pdfplumber(pdf_path):
-    """Extract member data from ECR PDF using pdfplumber (for normal PDFs)."""
-    all_data = []
-    
-    with pdfplumber.open(pdf_path) as pdf:
-        for page in pdf.pages:
-            tables = page.extract_tables()
-            
-            if not tables:
-                continue
-                
-            table = tables[0]
-            
-            for row in table:
-                if row and row[0] and str(row[0]).strip().replace('\n', '').isdigit():
-                    all_data.append(row)
-    
-    return all_data
+# ============================================================
+# 0. Dashboard
+# ============================================================
 
+if menu == "🏠 Dashboard":
 
-def extract_ecr_data_ocr(pdf_path):
-    """Extract member data from ECR PDF using OCR (for rotated/vectorized PDFs)."""
-    if not OCR_AVAILABLE:
-        return []
-    
-    all_data = []
-    doc = fitz.open(pdf_path)
-    
-    for page_num in range(len(doc)):
-        page = doc[page_num]
-        
-        # Render page to image at high resolution
-        mat = fitz.Matrix(2.5, 2.5)
-        pix = page.get_pixmap(matrix=mat)
-        img = Image.open(io.BytesIO(pix.tobytes("png")))
-        
-        # Try rotations to find the right orientation
-        for rotation in [0, -90, 90, 180]:
-            if rotation != 0:
-                img_to_ocr = img.rotate(rotation, expand=True)
-            else:
-                img_to_ocr = img
-            
-            # Run OCR
-            text = pytesseract.image_to_string(img_to_ocr)
-            
-            # Find all 12-digit UAN numbers
-            uans_found = re.findall(r'\b\d{12}\b', text)
-            
-            if len(uans_found) >= 3:  # Found meaningful data
-                # Parse the text line by line
-                lines = text.split('\n')
-                
-                for line in lines:
-                    # Look for UAN pattern (12 digits)
-                    uan_match = re.search(r'\b(\d{12})\b', line)
-                    if uan_match:
-                        uan = uan_match.group(1)
-                        
-                        # Find serial number before UAN
-                        before_uan = line[:uan_match.start()]
-                        sl_match = re.search(r'(\d{1,3})\s*[|\s]*$', before_uan)
-                        sl_no = sl_match.group(1) if sl_match else str(len(all_data) + 1)
-                        
-                        # Find all numbers after UAN (wages, contributions, etc.)
-                        after_uan = line[uan_match.end():]
-                        # Extract numbers (with commas, decimals, or plain)
-                        numbers = re.findall(r'[\d,]+\.?\d*', after_uan)
-                        
-                        # Clean numbers - remove commas
-                        clean_numbers = []
-                        for num in numbers:
-                            cleaned = num.replace(',', '')
-                            if cleaned and cleaned.replace('.', '').isdigit():
-                                clean_numbers.append(cleaned)
-                        
-                        # Build row: need at least Gross, EPF, EPS, EDLI, EE, EPS, ER
-                        if len(clean_numbers) >= 7:
-                            row = [None] * 17
-                            row[0] = sl_no  # Sl. No.
-                            row[1] = uan    # UAN
-                            row[2] = None   # Name ECR (skip)
-                            row[3] = None   # Name UAN (skip)
-                            
-                            # Map numbers to columns
-                            # clean_numbers[0] = Gross, [1]=EPF, [2]=EPS, [3]=EDLI, [4]=EE, [5]=EPS, [6]=ER
-                            col_map = [4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
-                            for idx, num in enumerate(clean_numbers[:len(col_map)]):
-                                row[col_map[idx]] = num
-                            
-                            all_data.append(row)
-                
-                break  # Found data with this rotation
-    
-    return all_data
+    st.subheader("Employer Dashboard")
 
+    active = len(
+        [e for e in st.session_state.employees if e["status"] == "Active"]
+    )
 
-def extract_ecr_data(pdf_path):
-    """Extract member data from ECR PDF - tries normal extraction first, then OCR."""
-    # Try normal extraction first
-    data = extract_ecr_data_pdfplumber(pdf_path)
-    
-    if data:
-        return data, "normal"
-    
-    # If no data found and OCR is available, try OCR
-    if OCR_AVAILABLE:
-        data = extract_ecr_data_ocr(pdf_path)
-        if data:
-            return data, "ocr"
-    
-    return [], None
+    pending_kyc = len(
+        [e for e in st.session_state.employees if e["kyc"] == "Pending"]
+    )
 
+    pending_ecr = len(
+        [x for x in st.session_state.ecr if x["status"] != "Paid"]
+    )
 
-def convert_ecr_to_excel(pdf_path, output_path):
-    """Convert PF ECR PDF to Excel format."""
-    
-    data, method = extract_ecr_data(pdf_path)
-    
-    if not data:
-        if OCR_AVAILABLE:
-            raise ValueError("No member data found in PDF. Please ensure this is a valid ECR PDF.")
-        else:
-            raise ValueError("No member data found. This PDF may require OCR. Please install: pip install pymupdf pytesseract pillow")
-    
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "ECR Data"
-    
-    # Headers with 2 blank columns after UAN
-    headers = [
-        'Sl. No.', 'UAN', '', '', 'Gross', 'EPF', 'EPS', 'EDLI', 
-        'EE', 'EPS', 'ER', 'NCP\nDays', 'Refunds', 
-        'Pension Share', 'ER PF\nShare', 'EE Share', ''
-    ]
-    
-    # Mapping: (pdf_col_index, excel_col_index)
-    column_mapping = [
-        (0, 1),   # Sl. No.
-        (1, 2),   # UAN
-        # columns 3 and 4 are blank
-        (4, 5),   # Gross
-        (5, 6),   # EPF
-        (6, 7),   # EPS
-        (7, 8),   # EDLI
-        (8, 9),   # EE
-        (9, 10),  # EPS
-        (10, 11), # ER
-        (11, 12), # NCP Days
-        (12, 13), # Refunds
-        (13, 14), # Pension Share
-        (14, 15), # ER PF Share
-        (15, 16), # EE Share
-        (16, 17), # Posting Location
-    ]
-    
-    numeric_columns = [1, 5, 6, 7, 8, 9, 10, 11, 12, 13]
-    
-    for col, header in enumerate(headers, start=1):
-        cell = ws.cell(row=1, column=col, value=header)
-        cell.font = Font(bold=False)
-        cell.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
-    
-    for row_idx, row_data in enumerate(data, start=2):
-        for pdf_col_idx, excel_col_idx in column_mapping:
-            if pdf_col_idx < len(row_data) and row_data[pdf_col_idx] is not None:
-                value = row_data[pdf_col_idx]
-                
-                if excel_col_idx in numeric_columns:
-                    value = clean_number(value)
-                elif value:
-                    value = str(value).strip().replace('\n', ' ')
-                
-                cell = ws.cell(row=row_idx, column=excel_col_idx, value=value)
-                cell.alignment = Alignment(horizontal='center' if excel_col_idx <= 2 else 'right')
-    
-    column_widths = [8, 14, 8, 8, 8, 8, 8, 8, 6, 6, 6, 8, 8, 12, 10, 10, 6]
-    for col, width in enumerate(column_widths, start=1):
-        col_letter = chr(64 + col) if col <= 26 else 'A' + chr(64 + col - 26)
-        ws.column_dimensions[col_letter].width = width
-    
-    wb.save(output_path)
-    return len(data)
+    paid_challans = len(
+        [x for x in st.session_state.challans if x["status"] == "Paid"]
+    )
 
+    c1, c2, c3, c4 = st.columns(4)
 
-def convert_excel_to_csv(excel_path, output_path):
-    """Convert Excel file to CSV format with commas removed from numbers."""
-    df = pd.read_excel(excel_path, header=None)
-    
-    if df.empty:
-        raise ValueError("The Excel file is empty.")
-    
-    def remove_commas(val):
-        if pd.isna(val):
-            return val
-        val_str = str(val)
-        if ',' in val_str:
-            if val_str.startswith('#'):
-                prefix = '# '
-                num_part = val_str[1:].strip().replace(',', '')
-                return prefix + num_part
-            else:
-                cleaned = val_str.replace(',', '')
-                try:
-                    float(cleaned)
-                    return cleaned
-                except ValueError:
-                    return val_str
-        return val
-    
-    if hasattr(df, 'map'):
-        df = df.map(remove_commas)
+    c1.metric("Active Employees", active)
+    c2.metric("Pending KYC", pending_kyc)
+    c3.metric("Pending ECR", pending_ecr)
+    c4.metric("Paid Challans", paid_challans)
+
+    st.subheader("Alerts and To Do Tasks")
+
+    alerts = []
+
+    if pending_kyc:
+        alerts.append(f"⚠️ {pending_kyc} employee KYC item(s) pending.")
+
+    if not st.session_state.ecr:
+        alerts.append("📄 Monthly ECR has not been created in this demo.")
+
+    if not alerts:
+        alerts.append("✅ No pending demo tasks.")
+
+    for alert in alerts:
+        st.info(alert)
+
+    st.subheader("Recent Activity")
+
+    if st.session_state.logs:
+        st.dataframe(
+            pd.DataFrame(st.session_state.logs[:10]),
+            use_container_width=True,
+            hide_index=True,
+        )
     else:
-        df = df.applymap(remove_commas)
-    
-    df.to_csv(output_path, index=False, header=False, encoding='utf-8')
-    return len(df)
+        st.info("No activity yet.")
 
 
-@app.route('/', methods=['GET', 'POST'])
-def index():
-    error_message = ''
-    
-    if request.method == 'POST':
-        conversion_type = request.form.get('conversion_type', '')
-        
-        if 'file' not in request.files:
-            error_message = '<div class="alert alert-error">No file selected</div>'
+# ============================================================
+# 1. Establishment Registration
+# ============================================================
+
+elif menu == "1️⃣ Establishment Registration":
+
+    st.subheader("Establishment Registration — Demo")
+
+    st.info(
+        "This is a simulated registration form. It does not submit "
+        "anything to EPFO."
+    )
+
+    with st.form("registration"):
+
+        name = st.text_input(
+            "Establishment Name",
+            company["name"],
+        )
+
+        constitution = st.selectbox(
+            "Constitution",
+            [
+                "Private Limited Company",
+                "Public Limited Company",
+                "Partnership",
+                "LLP",
+                "Proprietorship",
+                "Trust",
+                "Society",
+            ],
+        )
+
+        pan = st.text_input("PAN", company["pan"])
+
+        address = st.text_area(
+            "Registered Address",
+            company["address"],
+        )
+
+        state = st.selectbox(
+            "State",
+            [
+                "Haryana",
+                "Delhi",
+                "Maharashtra",
+                "Karnataka",
+                "Tamil Nadu",
+                "Uttar Pradesh",
+                "Other",
+            ],
+        )
+
+        authorized = st.text_input(
+            "Authorized Signatory",
+            "Demo Authorized Person",
+        )
+
+        mobile = st.text_input(
+            "Mobile",
+            company["mobile"],
+        )
+
+        email = st.text_input(
+            "Email",
+            company["email"],
+        )
+
+        submitted = st.form_submit_button(
+            "Submit Registration — DEMO",
+            type="primary",
+        )
+
+        if submitted:
+
+            company.update(
+                {
+                    "name": name,
+                    "constitution": constitution,
+                    "pan": pan,
+                    "address": address,
+                    "mobile": mobile,
+                    "email": email,
+                }
+            )
+
+            add_log("Demo establishment registration submitted")
+
+            st.success(
+                "Demo registration submitted successfully."
+            )
+
+            st.code(
+                f"""
+Application Number : DEMO-REG-2026-001
+Establishment Code : {company['code']}
+Status             : Demo Submitted
+State              : {state}
+                """
+            )
+
+
+# ============================================================
+# 2. Employer Login
+# ============================================================
+
+elif menu == "2️⃣ Employer Login":
+
+    st.subheader("Employer Login Information")
+
+    st.success("You are currently logged in.")
+
+    st.write("**Demo User ID:**", st.session_state.username)
+    st.write("**Establishment Code:**", company["code"])
+
+    st.info(
+        "Actual EPFO password/OTP functionality is intentionally "
+        "not implemented in this training clone."
+    )
+
+    if st.button("Simulate Password Change"):
+        add_log("Demo password-change workflow opened")
+        st.success("Demo password changed successfully.")
+
+
+# ============================================================
+# 3. Establishment Profile
+# ============================================================
+
+elif menu == "3️⃣ Establishment / Profile":
+
+    st.subheader("Establishment Profile")
+
+    with st.form("profile"):
+
+        company["name"] = st.text_input(
+            "Establishment Name",
+            company["name"],
+        )
+
+        company["pan"] = st.text_input(
+            "PAN",
+            company["pan"],
+        )
+
+        company["address"] = st.text_area(
+            "Address",
+            company["address"],
+        )
+
+        company["constitution"] = st.selectbox(
+            "Constitution",
+            [
+                "Private Limited Company",
+                "Public Limited Company",
+                "Partnership",
+                "LLP",
+                "Proprietorship",
+            ],
+            index=0,
+        )
+
+        company["mobile"] = st.text_input(
+            "Mobile",
+            company["mobile"],
+        )
+
+        company["email"] = st.text_input(
+            "Email",
+            company["email"],
+        )
+
+        if st.form_submit_button(
+            "Save Profile",
+            type="primary",
+        ):
+            add_log("Establishment profile updated")
+            st.success("Profile saved in demo session.")
+
+    st.divider()
+
+    st.write("### Establishment Status")
+
+    c1, c2, c3 = st.columns(3)
+
+    c1.metric("Establishment Code", company["code"])
+    c2.metric("Status", company["status"])
+    c3.metric("Constitution", company["constitution"])
+
+
+# ============================================================
+# 4. Employee / Member
+# ============================================================
+
+elif menu == "4️⃣ Employee / Member":
+
+    st.subheader("Employee / Member Management")
+
+    tab1, tab2 = st.tabs(
+        [
+            "➕ Add Employee",
+            "📋 Employee List",
+        ]
+    )
+
+    with tab1:
+
+        with st.form("add_employee"):
+
+            name = st.text_input("Employee Name")
+
+            dob = st.date_input(
+                "Date of Birth",
+                date(1995, 1, 1),
+            )
+
+            gender = st.selectbox(
+                "Gender",
+                ["Male", "Female", "Other"],
+            )
+
+            doj = st.date_input(
+                "Date of Joining",
+                date.today(),
+            )
+
+            basic = st.number_input(
+                "Basic Wages",
+                min_value=0.0,
+                value=30000.0,
+                step=500.0,
+            )
+
+            existing = st.radio(
+                "Previous UAN?",
+                [
+                    "Yes — Existing UAN",
+                    "No — Generate Demo UAN",
+                ],
+            )
+
+            old_uan = ""
+
+            if existing.startswith("Yes"):
+                old_uan = st.text_input(
+                    "Existing UAN",
+                    "100000000099",
+                )
+
+            aadhaar = st.selectbox(
+                "Aadhaar KYC",
+                ["Pending", "Verified", "Rejected"],
+            )
+
+            pan_status = st.selectbox(
+                "PAN KYC",
+                ["Pending", "Verified", "Rejected"],
+            )
+
+            bank = st.selectbox(
+                "Bank KYC",
+                ["Pending", "Verified", "Rejected"],
+            )
+
+            save = st.form_submit_button(
+                "Add Employee",
+                type="primary",
+            )
+
+            if save:
+
+                uan = (
+                    old_uan
+                    if existing.startswith("Yes")
+                    else generate_uan()
+                )
+
+                kyc = (
+                    "Approved"
+                    if (
+                        aadhaar == "Verified"
+                        and pan_status == "Verified"
+                        and bank == "Verified"
+                    )
+                    else "Pending"
+                )
+
+                emp = {
+                    "member_id": generate_member_id(),
+                    "name": name or "Demo Employee",
+                    "dob": str(dob),
+                    "gender": gender,
+                    "doj": str(doj),
+                    "doe": "",
+                    "reason": "",
+                    "uan": uan,
+                    "basic": basic,
+                    "epf_wages": min(basic, 15000),
+                    "eps_wages": min(basic, 15000),
+                    "edli_wages": min(basic, 15000),
+                    "aadhaar": aadhaar,
+                    "pan": pan_status,
+                    "bank": bank,
+                    "kyc": kyc,
+                    "status": "Active",
+                }
+
+                st.session_state.employees.append(emp)
+
+                add_log(
+                    f"Employee added: {emp['name']} / UAN {uan}"
+                )
+
+                st.success(
+                    f"Employee added. Demo UAN: {uan}"
+                )
+
+    with tab2:
+
+        df = employee_dataframe()
+
+        if not df.empty:
+            st.dataframe(
+                df,
+                use_container_width=True,
+                hide_index=True,
+            )
         else:
-            file = request.files['file']
-            
-            if file.filename == '':
-                error_message = '<div class="alert alert-error">No file selected</div>'
+            st.info("No employees.")
+
+
+# ============================================================
+# 5. KYC
+# ============================================================
+
+elif menu == "5️⃣ KYC":
+
+    st.subheader("KYC Management")
+
+    if not st.session_state.employees:
+        st.info("No employees available.")
+    else:
+
+        options = {
+            f"{e['name']} — {e['uan']}": i
+            for i, e in enumerate(st.session_state.employees)
+        }
+
+        selected = st.selectbox(
+            "Select Employee",
+            list(options.keys()),
+        )
+
+        idx = options[selected]
+        emp = st.session_state.employees[idx]
+
+        st.write(f"### {emp['name']}")
+
+        c1, c2, c3 = st.columns(3)
+
+        c1.metric("Aadhaar", emp["aadhaar"])
+        c2.metric("PAN", emp["pan"])
+        c3.metric("Bank", emp["bank"])
+
+        col1, col2, col3 = st.columns(3)
+
+        with col1:
+            if st.button("Verify Aadhaar"):
+                emp["aadhaar"] = "Verified"
+                add_log(f"Aadhaar verified: {emp['name']}")
+                st.rerun()
+
+        with col2:
+            if st.button("Verify PAN"):
+                emp["pan"] = "Verified"
+                add_log(f"PAN verified: {emp['name']}")
+                st.rerun()
+
+        with col3:
+            if st.button("Verify Bank"):
+                emp["bank"] = "Verified"
+                add_log(f"Bank KYC verified: {emp['name']}")
+                st.rerun()
+
+        if (
+            emp["aadhaar"] == "Verified"
+            and emp["pan"] == "Verified"
+            and emp["bank"] == "Verified"
+        ):
+            emp["kyc"] = "Approved"
+
+        st.success(f"KYC Status: {emp['kyc']}")
+
+        if st.button("Reject Demo KYC"):
+            emp["kyc"] = "Rejected"
+            add_log(f"KYC rejected: {emp['name']}")
+            st.rerun()
+
+
+# ============================================================
+# 6. UAN
+# ============================================================
+
+elif menu == "6️⃣ UAN Management":
+
+    st.subheader("UAN Management")
+
+    df = employee_dataframe()
+
+    if not df.empty:
+        st.dataframe(
+            df[["Name", "UAN", "Member ID", "Status"]],
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    st.divider()
+
+    st.write("### Generate Demo UAN")
+
+    if st.button("Generate New Demo UAN"):
+
+        uan = generate_uan()
+
+        st.success(
+            f"Generated Demo UAN: {uan}"
+        )
+
+        add_log(f"Demo UAN generated: {uan}")
+
+    st.write("### UAN Linking")
+
+    uan_input = st.text_input(
+        "Enter Demo UAN"
+    )
+
+    if st.button("Check UAN"):
+
+        found = any(
+            e["uan"] == uan_input
+            for e in st.session_state.employees
+        )
+
+        if found:
+            st.success("UAN found in demo database.")
+        else:
+            st.warning("UAN not found in demo database.")
+
+
+# ============================================================
+# 7. Salary / Contribution
+# ============================================================
+
+elif menu == "7️⃣ Salary / Contribution":
+
+    st.subheader("Salary & EPF Contribution Calculator")
+
+    basic = st.number_input(
+        "Basic Wages",
+        min_value=0.0,
+        value=30000.0,
+        step=500.0,
+    )
+
+    c = calc_contribution(basic)
+
+    cols = st.columns(4)
+
+    cols[0].metric(
+        "EPF Wages",
+        money(c["epf_wages"]),
+    )
+
+    cols[1].metric(
+        "Employee PF",
+        money(c["employee"]),
+    )
+
+    cols[2].metric(
+        "Employer PF",
+        money(c["employer_total"]),
+    )
+
+    cols[3].metric(
+        "EDLI",
+        money(c["edli"]),
+    )
+
+    st.write("### Calculation Breakdown")
+
+    calc_df = pd.DataFrame(
+        [
+            ["Employee EPF", c["employee"]],
+            ["Employer EPF", c["employer_epf"]],
+            ["EPS", c["eps"]],
+            ["EDLI", c["edli"]],
+            ["Total Demo Contribution", c["total"]],
+        ],
+        columns=["Component", "Amount"],
+    )
+
+    st.dataframe(
+        calc_df,
+        use_container_width=True,
+        hide_index=True,
+    )
+
+    st.warning(
+        "These percentages/limits are simplified for demonstration. "
+        "Do not use this calculator for an actual statutory filing."
+    )
+
+
+# ============================================================
+# 8. ECR
+# ============================================================
+
+elif menu == "8️⃣ ECR Filing":
+
+    st.subheader("Monthly ECR — Demo")
+
+    month = st.selectbox(
+        "Contribution Month",
+        [
+            "April 2026",
+            "May 2026",
+            "June 2026",
+            "July 2026",
+            "August 2026",
+            "September 2026",
+        ],
+    )
+
+    active_employees = [
+        e
+        for e in st.session_state.employees
+        if e["status"] == "Active"
+    ]
+
+    if not active_employees:
+        st.warning("No active employees.")
+    else:
+
+        rows = []
+
+        for e in active_employees:
+
+            c = calc_contribution(e["basic"])
+
+            rows.append(
+                {
+                    "UAN": e["uan"],
+                    "Name": e["name"],
+                    "EPF Wages": c["epf_wages"],
+                    "EPS Wages": c["eps_wages"],
+                    "EDLI Wages": c["edli_wages"],
+                    "Employee Share": c["employee"],
+                    "Employer EPF": c["employer_epf"],
+                    "EPS": c["eps"],
+                    "EDLI": c["edli"],
+                }
+            )
+
+        ecr_df = pd.DataFrame(rows)
+
+        st.dataframe(
+            ecr_df,
+            use_container_width=True,
+            hide_index=True,
+        )
+
+        total_employee = ecr_df["Employee Share"].sum()
+        total_employer = (
+            ecr_df["Employer EPF"].sum()
+            + ecr_df["EPS"].sum()
+        )
+
+        total = (
+            total_employee
+            + total_employer
+            + ecr_df["EDLI"].sum()
+        )
+
+        c1, c2, c3 = st.columns(3)
+
+        c1.metric(
+            "Employee Share",
+            money(total_employee),
+        )
+
+        c2.metric(
+            "Employer Share",
+            money(total_employer),
+        )
+
+        c3.metric(
+            "Total Demo",
+            money(total),
+        )
+
+        if st.button(
+            "1. Validate ECR",
+            type="secondary",
+        ):
+
+            errors = []
+
+            for e in active_employees:
+
+                if len(e["uan"]) != 12:
+                    errors.append(
+                        f"{e['name']}: Invalid UAN"
+                    )
+
+                if e["basic"] <= 0:
+                    errors.append(
+                        f"{e['name']}: Invalid wages"
+                    )
+
+            if errors:
+                st.error("ECR validation failed.")
+
+                for error in errors:
+                    st.write("❌", error)
+
             else:
-                filename = secure_filename(file.filename)
-                file_ext = filename.rsplit('.', 1)[1].lower() if '.' in filename else ''
-                
-                if conversion_type == 'pdf_to_excel':
-                    if file_ext != 'pdf':
-                        error_message = '<div class="alert alert-error">Please upload a PDF file for this conversion.</div>'
-                    else:
-                        with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as tmp_pdf:
-                            file.save(tmp_pdf.name)
-                            pdf_path = tmp_pdf.name
-                        
-                        base_name = os.path.splitext(filename)[0]
-                        excel_filename = f"{base_name}_converted.xlsx"
-                        
-                        with tempfile.NamedTemporaryFile(delete=False, suffix='.xlsx') as tmp_xlsx:
-                            excel_path = tmp_xlsx.name
-                        
-                        try:
-                            convert_ecr_to_excel(pdf_path, excel_path)
-                            
-                            with open(excel_path, 'rb') as f:
-                                file_data = f.read()
-                            
-                            os.unlink(pdf_path)
-                            os.unlink(excel_path)
-                            
-                            response = make_response(file_data)
-                            response.headers['Content-Type'] = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
-                            response.headers['Content-Disposition'] = f'attachment; filename={excel_filename}'
-                            return response
-                            
-                        except Exception as e:
-                            if os.path.exists(pdf_path):
-                                os.unlink(pdf_path)
-                            if os.path.exists(excel_path):
-                                os.unlink(excel_path)
-                            error_message = f'<div class="alert alert-error">Error: {str(e)}</div>'
-                
-                elif conversion_type == 'excel_to_csv':
-                    if file_ext not in ['xlsx', 'xls']:
-                        error_message = '<div class="alert alert-error">Please upload an Excel file (.xlsx or .xls) for this conversion.</div>'
-                    else:
-                        with tempfile.NamedTemporaryFile(delete=False, suffix=f'.{file_ext}') as tmp_excel:
-                            file.save(tmp_excel.name)
-                            excel_path = tmp_excel.name
-                        
-                        base_name = os.path.splitext(filename)[0]
-                        csv_filename = f"{base_name}.csv"
-                        
-                        with tempfile.NamedTemporaryFile(delete=False, suffix='.csv') as tmp_csv:
-                            csv_path = tmp_csv.name
-                        
-                        try:
-                            convert_excel_to_csv(excel_path, csv_path)
-                            
-                            with open(csv_path, 'rb') as f:
-                                file_data = f.read()
-                            
-                            os.unlink(excel_path)
-                            os.unlink(csv_path)
-                            
-                            response = make_response(file_data)
-                            response.headers['Content-Type'] = 'text/csv; charset=utf-8'
-                            response.headers['Content-Disposition'] = f'attachment; filename={csv_filename}'
-                            return response
-                            
-                        except Exception as e:
-                            if os.path.exists(excel_path):
-                                os.unlink(excel_path)
-                            if os.path.exists(csv_path):
-                                os.unlink(csv_path)
-                            error_message = f'<div class="alert alert-error">Error: {str(e)}</div>'
-    
-    html = HTML_TEMPLATE.replace('{{ERROR_MESSAGE}}', error_message)
-    return html
+                st.success(
+                    "ECR validation successful."
+                )
+
+                st.session_state["validated_ecr"] = {
+                    "month": month,
+                    "df": ecr_df,
+                    "total": total,
+                }
+
+        if st.button(
+            "2. Submit ECR",
+            type="primary",
+        ):
+
+            if "validated_ecr" not in st.session_state:
+                st.error(
+                    "Validate ECR before submission."
+                )
+            else:
+
+                trrn = generate_trrn()
+
+                record = {
+                    "month": month,
+                    "trrn": trrn,
+                    "employees": len(active_employees),
+                    "amount": total,
+                    "status": "Submitted",
+                    "created": datetime.now().strftime(
+                        "%Y-%m-%d %H:%M:%S"
+                    ),
+                }
+
+                st.session_state.ecr.append(record)
+
+                add_log(
+                    f"ECR submitted for {month}, TRRN {trrn}"
+                )
+
+                st.success(
+                    "ECR submitted successfully in demo."
+                )
+
+                st.code(
+                    f"""
+Month : {month}
+TRRN  : {trrn}
+Amount: {money(total)}
+Status: Submitted
+                    """
+                )
 
 
-if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 5000))
-    debug = os.environ.get('FLASK_DEBUG', 'False').lower() == 'true'
-    
-    print("\n" + "="*50)
-    print("  PF ECR Converter")
-    print("="*50)
-    print("\n  Features:")
-    print("  • PDF to Excel (ECR files)")
-    print("  • Excel to CSV")
-    print(f"\n  OCR Support: {'✓ Enabled' if OCR_AVAILABLE else '✗ Disabled'}")
-    print(f"\n  Open your browser and go to:")
-    print(f"  👉  http://localhost:{port}")
-    print("\n  Press Ctrl+C to stop the server")
-    print("="*50 + "\n")
-    app.run(host='0.0.0.0', port=port, debug=debug)
+# ============================================================
+# 9. ECR Errors
+# ============================================================
+
+elif menu == "9️⃣ ECR Errors":
+
+    st.subheader("ECR Error Simulator")
+
+    error_type = st.selectbox(
+        "Select Error",
+        [
+            "Invalid UAN",
+            "Duplicate UAN",
+            "Wrong Wages",
+            "Invalid Member",
+            "DOJ Problem",
+            "DOE Problem",
+            "Missing KYC",
+            "Previous Employment Issue",
+        ],
+    )
+
+    if st.button("Simulate Error"):
+
+        solutions = {
+            "Invalid UAN":
+                "Verify the UAN format and employee record.",
+            "Duplicate UAN":
+                "Check whether the same UAN is already mapped.",
+            "Wrong Wages":
+                "Review payroll and ECR wage values.",
+            "Invalid Member":
+                "Verify Member ID and UAN mapping.",
+            "DOJ Problem":
+                "Check date of joining.",
+            "DOE Problem":
+                "Verify exit date and reason.",
+            "Missing KYC":
+                "Complete required KYC verification.",
+            "Previous Employment Issue":
+                "Verify previous employment/UAN history.",
+        }
+
+        st.error(error_type)
+        st.info(solutions[error_type])
+
+
+# ============================================================
+# 10. Challan / TRRN
+# ============================================================
+
+elif menu == "🔟 Challan / TRRN":
+
+    st.subheader("Challan / TRRN Management")
+
+    if not st.session_state.ecr:
+
+        st.info(
+            "Submit an ECR first to create a demo challan."
+        )
+
+    else:
+
+        for ecr in st.session_state.ecr:
+
+            st.write(
+                f"### {ecr['month']} — {ecr['trrn']}"
+            )
+
+            st.write(
+                f"Amount: **{money(ecr['amount'])}**"
+            )
+
+            existing = next(
+                (
+                    c
+                    for c in st.session_state.challans
+                    if c["trrn"] == ecr["trrn"]
+                ),
+                None,
+            )
+
+            if not existing:
+
+                if st.button(
+                    f"Generate Challan — {ecr['trrn']}",
+                    key=f"challan_{ecr['trrn']}",
+                ):
+
+                    challan = {
+                        "trrn": ecr["trrn"],
+                        "challan_no":
+                            "CHL" +
+                            "".join(
+                                random.choices(
+                                    string.digits,
+                                    k=10,
+                                )
+                            ),
+                        "amount": ecr["amount"],
+                        "status": "Unpaid",
+                        "date":
+                            date.today().isoformat(),
+                    }
+
+                    st.session_state.challans.append(
+                        challan
+                    )
+
+                    add_log(
+                        f"Challan generated: {challan['challan_no']}"
+                    )
+
+                    st.rerun()
+
+            else:
+
+                st.success(
+                    f"Challan: {existing['challan_no']}"
+                )
+
+                st.write(
+                    f"Status: **{existing['status']}**"
+                )
+
+                if existing["status"] == "Unpaid":
+
+                    if st.button(
+                        "Pay Challan — DEMO",
+                        key=f"pay_{existing['trrn']}",
+                        type="primary",
+                    ):
+
+                        existing["status"] = "Paid"
+
+                        add_log(
+                            f"Demo challan paid: "
+                            f"{existing['challan_no']}"
+                        )
+
+                        st.success(
+                            "Demo payment successful."
+                        )
+
+                        st.rerun()
+
+
+# ============================================================
+# 11. Payment Reconciliation
+# ============================================================
+
+elif menu == "1️⃣1️⃣ Payment Reconciliation":
+
+    st.subheader("Payment Reconciliation")
+
+    if st.session_state.challans:
+
+        df = pd.DataFrame(
+            st.session_state.challans
+        )
+
+        st.dataframe(
+            df,
+            use_container_width=True,
+            hide_index=True,
+        )
+
+        paid = len(
+            [
+                x
+                for x in st.session_state.challans
+                if x["status"] == "Paid"
+            ]
+        )
+
+        unpaid = len(
+            [
+                x
+                for x in st.session_state.challans
+                if x["status"] != "Paid"
+            ]
+        )
+
+        c1, c2 = st.columns(2)
+
+        c1.metric("Paid", paid)
+        c2.metric("Pending", unpaid)
+
+    else:
+        st.info("No challans available.")
+
+
+# ============================================================
+# 12. Employee Exit
+# ============================================================
+
+elif menu == "1️⃣2️⃣ Employee Exit":
+
+    st.subheader("Employee Exit")
+
+    active = [
+        (i, e)
+        for i, e in enumerate(
+            st.session_state.employees
+        )
+        if e["status"] == "Active"
+    ]
+
+    if not active:
+
+        st.info("No active employees.")
+
+    else:
+
+        choices = {
+            f"{e['name']} — {e['uan']}": i
+            for i, e in active
+        }
+
+        selected = st.selectbox(
+            "Employee",
+            list(choices.keys()),
+        )
+
+        idx = choices[selected]
+
+        emp = st.session_state.employees[idx]
+
+        exit_date = st.date_input(
+            "Date of Exit",
+            date.today(),
+        )
+
+        reason = st.selectbox(
+            "Reason",
+            [
+                "Cessation of employment",
+                "Superannuation",
+                "Death",
+                "Permanent disablement",
+                "Other",
+            ],
+        )
+
+        if st.button(
+            "Mark Exit — DEMO",
+            type="primary",
+        ):
+
+            emp["doe"] = str(exit_date)
+            emp["reason"] = reason
+            emp["status"] = "Exited"
+
+            add_log(
+                f"Employee exit marked: {emp['name']}"
+            )
+
+            st.success(
+                f"{emp['name']} marked as exited."
+            )
+
+
+# ============================================================
+# 13. Transfer / Previous Employment
+# ============================================================
+
+elif menu == "1️⃣3️⃣ Transfer / Previous Employment":
+
+    st.subheader(
+        "Transfer / Previous Employment — Demo"
+    )
+
+    uan = st.text_input(
+        "UAN",
+        "100000000001",
+    )
+
+    previous_member = st.text_input(
+        "Previous Member ID",
+        "DLCPM000000000001",
+    )
+
+    current_member = st.text_input(
+        "Current Member ID",
+        company["code"] + "00000003",
+    )
+
+    if st.button("Check Employment History"):
+
+        found = next(
+            (
+                e
+                for e in st.session_state.employees
+                if e["uan"] == uan
+            ),
+            None,
+        )
+
+        if found:
+
+            st.success(
+                f"Employee found: {found['name']}"
+            )
+
+            st.write(
+                f"Previous Member ID: {previous_member}"
+            )
+
+            st.write(
+                f"Current Member ID: {current_member}"
+            )
+
+        else:
+            st.warning(
+                "UAN not found in demo database."
+            )
+
+    if st.button("Simulate Transfer Request"):
+
+        add_log(
+            f"Demo transfer request created for UAN {uan}"
+        )
+
+        st.success(
+            "Demo transfer request created."
+        )
+
+
+# ============================================================
+# 14. Online Services
+# ============================================================
+
+elif menu == "1️⃣4️⃣ Online Services":
+
+    st.subheader("Online Services")
+
+    services = [
+        "Employer Profile",
+        "Member Management",
+        "KYC Management",
+        "UAN Services",
+        "ECR Filing",
+        "Challan",
+        "Payment Status",
+        "Member Exit",
+        "Transfer / Employment History",
+        "Correction Request",
+        "Compliance Services",
+        "Reports",
+    ]
+
+    for service in services:
+
+        if st.button(
+            service,
+            use_container_width=True,
+        ):
+
+            add_log(
+                f"Opened demo service: {service}"
+            )
+
+            st.success(
+                f"{service} demo opened."
+            )
+
+
+# ============================================================
+# 15. Compliance Dashboard
+# ============================================================
+
+elif menu == "1️⃣5️⃣ Compliance Dashboard":
+
+    st.subheader("Compliance Dashboard")
+
+    total_employees = len(
+        st.session_state.employees
+    )
+
+    active_employees = len(
+        [
+            e
+            for e in st.session_state.employees
+            if e["status"] == "Active"
+        ]
+    )
+
+    kyc_pending = len(
+        [
+            e
+            for e in st.session_state.employees
+            if e["kyc"] == "Pending"
+        ]
+    )
+
+    c1, c2, c3 = st.columns(3)
+
+    c1.metric(
+        "Total Members",
+        total_employees,
+    )
+
+    c2.metric(
+        "Active Members",
+        active_employees,
+    )
+
+    c3.metric(
+        "KYC Pending",
+        kyc_pending,
+    )
+
+    st.write("### Compliance Checklist")
+
+    checks = [
+        ("Establishment Active", company["status"] == "Active"),
+        ("Employees Added", total_employees > 0),
+        ("KYC Review", kyc_pending == 0),
+        ("ECR Created", len(st.session_state.ecr) > 0),
+        ("Challan Generated", len(st.session_state.challans) > 0),
+    ]
+
+    for name, result in checks:
+
+        if result:
+            st.success(f"✅ {name}")
+        else:
+            st.warning(f"⚠️ {name}")
+
+
+# ============================================================
+# 16. Downloads
+# ============================================================
+
+elif menu == "1️⃣6️⃣ Downloads":
+
+    st.subheader("Downloads")
+
+    df = employee_dataframe()
+
+    if not df.empty:
+
+        st.download_button(
+            "⬇️ Download Employee Report",
+            data=csv_download(df),
+            file_name="employee_report_demo.csv",
+            mime="text/csv",
+        )
+
+    if st.session_state.ecr:
+
+        ecr_df = pd.DataFrame(
+            st.session_state.ecr
+        )
+
+        st.download_button(
+            "⬇️ Download ECR Summary",
+            data=csv_download(ecr_df),
+            file_name="ecr_summary_demo.csv",
+            mime="text/csv",
+        )
+
+    if st.session_state.challans:
+
+        challan_df = pd.DataFrame(
+            st.session_state.challans
+        )
+
+        st.download_button(
+            "⬇️ Download Challan Report",
+            data=csv_download(challan_df),
+            file_name="challan_report_demo.csv",
+            mime="text/csv",
+        )
+
+    if st.session_state.logs:
+
+        logs_df = pd.DataFrame(
+            st.session_state.logs
+        )
+
+        st.download_button(
+            "⬇️ Download Activity Log",
+            data=csv_download(logs_df),
+            file_name="activity_log_demo.csv",
+            mime="text/csv",
+        )
+
+
+# ============================================================
+# 17. Reports
+# ============================================================
+
+elif menu == "1️⃣7️⃣ Reports":
+
+    st.subheader("Reports")
+
+    report_type = st.selectbox(
+        "Report",
+        [
+            "Member-wise Report",
+            "Monthly Contribution",
+            "Challan / TRRN",
+            "Payment Reconciliation",
+            "UAN Report",
+            "Establishment Report",
+        ],
+    )
+
+    if report_type == "Member-wise Report":
+
+        df = employee_dataframe()
+
+        st.dataframe(
+            df,
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    elif report_type == "Monthly Contribution":
+
+        rows = []
+
+        for e in st.session_state.employees:
+
+            c = calc_contribution(e["basic"])
+
+            rows.append(
+                {
+                    "Employee": e["name"],
+                    "UAN": e["uan"],
+                    "Employee Share": c["employee"],
+                    "Employer EPF": c["employer_epf"],
+                    "EPS": c["eps"],
+                    "EDLI": c["edli"],
+                }
+            )
+
+        st.dataframe(
+            pd.DataFrame(rows),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    elif report_type == "Challan / TRRN":
+
+        if st.session_state.challans:
+            st.dataframe(
+                pd.DataFrame(
+                    st.session_state.challans
+                ),
+                use_container_width=True,
+                hide_index=True,
+            )
+        else:
+            st.info("No challans.")
+
+    elif report_type == "Payment Reconciliation":
+
+        if st.session_state.challans:
+
+            rows = []
+
+            for c in st.session_state.challans:
+
+                rows.append(
+                    {
+                        "TRRN": c["trrn"],
+                        "Challan": c["challan_no"],
+                        "Amount": c["amount"],
+                        "Status": c["status"],
+                    }
+                )
+
+            st.dataframe(
+                pd.DataFrame(rows),
+                use_container_width=True,
+                hide_index=True,
+            )
+
+        else:
+            st.info("No payment records.")
+
+    elif report_type == "UAN Report":
+
+        rows = [
+            {
+                "Name": e["name"],
+                "UAN": e["uan"],
+                "Member ID": e["member_id"],
+                "Status": e["status"],
+            }
+            for e in st.session_state.employees
+        ]
+
+        st.dataframe(
+            pd.DataFrame(rows),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    else:
+
+        st.json(
+            {
+                "Establishment": company,
+                "Employee Count":
+                    len(st.session_state.employees),
+                "ECR Count":
+                    len(st.session_state.ecr),
+                "Challan Count":
+                    len(st.session_state.challans),
+            }
+        )
+
+
+# ============================================================
+# 18. Corrections
+# ============================================================
+
+elif menu == "1️⃣8️⃣ Corrections":
+
+    st.subheader("Correction Request — Demo")
+
+    employees = st.session_state.employees
+
+    if employees:
+
+        choices = {
+            f"{e['name']} — {e['uan']}": i
+            for i, e in enumerate(employees)
+        }
+
+        selected = st.selectbox(
+            "Employee",
+            list(choices.keys()),
+        )
+
+        idx = choices[selected]
+
+        correction_type = st.selectbox(
+            "Correction Type",
+            [
+                "Employee Name",
+                "Date of Birth",
+                "Father / Spouse Name",
+                "Aadhaar / KYC",
+                "UAN",
+                "Date of Joining",
+                "Date of Exit",
+                "Wages / Contribution",
+                "Employer Profile",
+            ],
+        )
+
+        old_value = st.text_input(
+            "Existing Value"
+        )
+
+        new_value = st.text_input(
+            "Requested Value"
+        )
+
+        reason = st.text_area(
+            "Reason for Correction"
+        )
+
+        if st.button(
+            "Submit Correction Request",
+            type="primary",
+        ):
+
+            request_id = (
+                "CORR-"
+                + "".join(
+                    random.choices(
+                        string.digits,
+                        k=8,
+                    )
+                )
+            )
+
+            st.session_state.corrections.append(
+                {
+                    "request_id": request_id,
+                    "employee": employees[idx]["name"],
+                    "type": correction_type,
+                    "old": old_value,
+                    "new": new_value,
+                    "reason": reason,
+                    "status": "Pending Approval",
+                    "date": datetime.now().strftime(
+                        "%Y-%m-%d"
+                    ),
+                }
+            )
+
+            add_log(
+                f"Correction request created: {request_id}"
+            )
+
+            st.success(
+                f"Correction request created: {request_id}"
+            )
+
+    if st.session_state.corrections:
+
+        st.write("### Correction Requests")
+
+        st.dataframe(
+            pd.DataFrame(
+                st.session_state.corrections
+            ),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+
+# ============================================================
+# 19. Notices / e-Proceedings
+# ============================================================
+
+elif menu == "1️⃣9️⃣ Notices / e-Proceedings":
+
+    st.subheader("Compliance Notices / e-Proceedings")
+
+    st.info(
+        "This is a simulated compliance module."
+    )
+
+    with st.form("notice"):
+
+        notice_type = st.selectbox(
+            "Notice Type",
+            [
+                "Contribution Default",
+                "Return Pending",
+                "KYC Issue",
+                "Wage Discrepancy",
+                "General Compliance",
+            ],
+        )
+
+        subject = st.text_input(
+            "Subject",
+            "Demo compliance notice",
+        )
+
+        details = st.text_area(
+            "Details",
+            "This is a simulated notice.",
+        )
+
+        if st.form_submit_button(
+            "Create Demo Notice"
+        ):
+
+            notice_id = (
+                "NOTICE-"
+                + "".join(
+                    random.choices(
+                        string.digits,
+                        k=8,
+                    )
+                )
+            )
+
+            st.session_state.notices.append(
+                {
+                    "notice_id": notice_id,
+                    "type": notice_type,
+                    "subject": subject,
+                    "details": details,
+                    "status": "Open",
+                    "date": date.today().isoformat(),
+                }
+            )
+
+            add_log(
+                f"Compliance notice created: {notice_id}"
+            )
+
+            st.success(
+                f"Notice {notice_id} created."
+            )
+
+    if st.session_state.notices:
+
+        st.write("### Notices")
+
+        st.dataframe(
+            pd.DataFrame(
+                st.session_state.notices
+            ),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+        notice_options = {
+            n["notice_id"]: n
+            for n in st.session_state.notices
+        }
+
+        selected_notice = st.selectbox(
+            "Select Notice",
+            list(notice_options.keys()),
+        )
+
+        if st.button("Submit Demo Response"):
+
+            notice_options[selected_notice][
+                "status"
+            ] = "Response Submitted"
+
+            add_log(
+                f"Response submitted: {selected_notice}"
+            )
+
+            st.success(
+                "Demo response submitted."
+            )
+
+
+# ============================================================
+# 20. Special Modules
+# ============================================================
+
+elif menu == "2️⃣0️⃣ Special Modules":
+
+    st.subheader("Special Modules")
+
+    module = st.selectbox(
+        "Module",
+        [
+            "ABRY — Demo",
+            "Exemption — Demo",
+            "Past Accumulation File Upload — Demo",
+            "International Worker — Demo",
+            "Other Establishment Services",
+        ],
+    )
+
+    if module == "Past Accumulation File Upload — Demo":
+
+        st.write(
+            "### Upload Demo File"
+        )
+
+        uploaded = st.file_uploader(
+            "Choose a CSV file",
+            type=["csv"],
+        )
+
+        if uploaded:
+
+            try:
+
+                df = pd.read_csv(uploaded)
+
+                st.success(
+                    "File loaded successfully."
+                )
+
+                st.dataframe(
+                    df,
+                    use_container_width=True,
+                )
+
+                if st.button(
+                    "Validate Demo File"
+                ):
+
+                    st.success(
+                        "Demo file validation successful."
+                    )
+
+            except Exception as ex:
+
+                st.error(
+                    f"Could not read file: {ex}"
+                )
+
+    elif module == "International Worker — Demo":
+
+        st.write(
+            "International Worker information"
+        )
+
+        passport = st.text_input(
+            "Demo Passport Number"
+        )
+
+        country = st.selectbox(
+            "Country",
+            [
+                "United States",
+                "United Kingdom",
+                "Singapore",
+                "UAE",
+                "Other",
+            ],
+        )
+
+        if st.button(
+            "Save International Worker — Demo"
+        ):
+
+            add_log(
+                "International Worker demo record saved"
+            )
+
+            st.success(
+                "Demo record saved."
+            )
+
+    elif module == "ABRY — Demo":
+
+        st.info(
+            "ABRY module is represented here as a "
+            "training simulation only."
+        )
+
+        if st.button(
+            "Create ABRY Demo Application"
+        ):
+
+            add_log(
+                "ABRY demo application created"
+            )
+
+            st.success(
+                "Demo ABRY application created."
+            )
+
+    elif module == "Exemption — Demo":
+
+        st.info(
+            "Exemption functionality is simulated."
+        )
+
+        if st.button(
+            "Create Exemption Demo Request"
+        ):
+
+            add_log(
+                "Exemption demo request created"
+            )
+
+            st.success(
+                "Demo exemption request created."
+            )
+
+    else:
+
+        st.info(
+            "Additional establishment-specific "
+            "services can be represented here."
+        )
+
+
+# ============================================================
+# Settings / Reset
+# ============================================================
+
+elif menu == "⚙️ Settings / Reset":
+
+    st.subheader("Demo Settings")
+
+    st.warning(
+        "Resetting the demo deletes all changes made "
+        "during this Streamlit session."
+    )
+
+    if st.button(
+        "🗑️ Reset Demo Data",
+        type="primary",
+    ):
+
+        for key in list(st.session_state.keys()):
+            del st.session_state[key]
+
+        st.rerun()
+
+    st.divider()
+
+    st.write("### Demo Information")
+
+    st.write(
+        """
+        **Login**
+
+        User ID: `DEMOEMP001`
+
+        Password: `demo123`
+
+        Captcha: `DEMO`
+
+        **Demo Establishment**
+
+        ABC Technologies Pvt. Ltd.
+
+        **Demo Establishment Code**
+
+        DLCPM0001234000
+        """
+    )
+
+
+# ============================================================
+# Footer
+# ============================================================
+
+st.divider()
+
+st.caption(
+    "EPFO Employer Portal — Training Demo | "
+    "Not an official EPFO application | "
+    "No real credentials, OTP, Aadhaar, PAN or payment data should be entered."
+)
