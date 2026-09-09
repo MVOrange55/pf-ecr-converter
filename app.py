@@ -1,2098 +1,2385 @@
 import streamlit as st
+import sqlite3
 import pandas as pd
-import random
-import string
 from datetime import date, datetime
-from pathlib import Path
+import hashlib
+import io
+import random
 
-# ============================================================
-# EPFO EMPLOYER PORTAL — TRAINING DEMO
-# ============================================================
+DB = "epfo_demo.db"
 
-st.set_page_config(
-    page_title="EPFO Employer Portal — Training Demo",
-    page_icon="🏢",
-    layout="wide",
-    initial_sidebar_state="expanded",
-)
+# =========================================================
+# DATABASE
+# =========================================================
 
-# -----------------------------
-# Session state
-# -----------------------------
+def db():
+    return sqlite3.connect(DB, check_same_thread=False)
 
-def init_state():
-    defaults = {
-        "logged_in": False,
-        "username": "",
-        "company": {
-            "name": "ABC Technologies Pvt. Ltd.",
-            "code": "DLCPM0001234000",
-            "pan": "ABCDE1234F",
-            "address": "Cyber City, Gurugram, Haryana",
-            "constitution": "Private Limited Company",
-            "status": "Active",
-            "mobile": "98XXXXXX10",
-            "email": "demo@abctech.example",
-        },
-        "employees": [
-            {
-                "member_id": "DLCPM00012340000001",
-                "name": "Rahul Sharma",
-                "dob": "1995-04-12",
-                "gender": "Male",
-                "doj": "2024-04-01",
-                "doe": "",
-                "reason": "",
-                "uan": "100000000001",
-                "basic": 30000,
-                "epf_wages": 15000,
-                "eps_wages": 15000,
-                "edli_wages": 15000,
-                "aadhaar": "Verified",
-                "pan": "Verified",
-                "bank": "Verified",
-                "kyc": "Approved",
-                "status": "Active",
-            },
-            {
-                "member_id": "DLCPM00012340000002",
-                "name": "Priya Verma",
-                "dob": "1997-09-21",
-                "gender": "Female",
-                "doj": "2024-06-10",
-                "doe": "",
-                "reason": "",
-                "uan": "100000000002",
-                "basic": 30000,
-                "epf_wages": 15000,
-                "eps_wages": 15000,
-                "edli_wages": 15000,
-                "aadhaar": "Pending",
-                "pan": "Verified",
-                "bank": "Pending",
-                "kyc": "Pending",
-                "status": "Active",
-            },
-        ],
-        "ecr": [],
-        "challans": [],
-        "notices": [],
-        "corrections": [],
-        "logs": [],
-    }
+def init_db():
+    con = db()
+    cur = con.cursor()
 
-    for k, v in defaults.items():
-        if k not in st.session_state:
-            st.session_state[k] = v
+    cur.executescript("""
+    CREATE TABLE IF NOT EXISTS users (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        username TEXT UNIQUE,
+        password TEXT,
+        role TEXT DEFAULT 'Employer',
+        active INTEGER DEFAULT 1
+    );
 
+    CREATE TABLE IF NOT EXISTS establishments (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        code TEXT UNIQUE,
+        name TEXT,
+        pan TEXT,
+        address TEXT,
+        state TEXT,
+        district TEXT,
+        pin TEXT,
+        email TEXT,
+        mobile TEXT,
+        constitution TEXT,
+        status TEXT DEFAULT 'Active'
+    );
 
-init_state()
+    CREATE TABLE IF NOT EXISTS employees (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        establishment_id INTEGER,
+        member_id TEXT UNIQUE,
+        uan TEXT,
+        name TEXT,
+        dob TEXT,
+        gender TEXT,
+        father_name TEXT,
+        doj TEXT,
+        doe TEXT,
+        exit_reason TEXT,
+        basic REAL DEFAULT 0,
+        epf_wages REAL DEFAULT 0,
+        eps_wages REAL DEFAULT 0,
+        edli_wages REAL DEFAULT 0,
+        status TEXT DEFAULT 'Active'
+    );
 
+    CREATE TABLE IF NOT EXISTS kyc (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        employee_id INTEGER,
+        aadhaar TEXT,
+        pan TEXT,
+        bank TEXT,
+        ifsc TEXT,
+        status TEXT DEFAULT 'Pending'
+    );
 
-# ============================================================
-# Helpers
-# ============================================================
+    CREATE TABLE IF NOT EXISTS payroll (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        employee_id INTEGER,
+        month TEXT,
+        basic REAL,
+        epf_wages REAL,
+        eps_wages REAL,
+        edli_wages REAL,
+        employee_share REAL,
+        employer_share REAL,
+        eps_share REAL,
+        edli_share REAL,
+        ncp REAL DEFAULT 0
+    );
 
-def money(value):
-    return f"₹{float(value):,.2f}"
+    CREATE TABLE IF NOT EXISTS ecr (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        month TEXT,
+        members INTEGER,
+        amount REAL,
+        status TEXT DEFAULT 'Draft',
+        trrn TEXT
+    );
 
+    CREATE TABLE IF NOT EXISTS ecr_errors (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        ecr_id INTEGER,
+        employee_id INTEGER,
+        error TEXT,
+        status TEXT DEFAULT 'Open'
+    );
 
-def generate_uan():
-    return "".join(random.choices(string.digits, k=12))
+    CREATE TABLE IF NOT EXISTS challans (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        trrn TEXT,
+        amount REAL,
+        status TEXT DEFAULT 'Unpaid',
+        created_at TEXT
+    );
 
+    CREATE TABLE IF NOT EXISTS payments (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        trrn TEXT,
+        amount REAL,
+        payment_ref TEXT,
+        status TEXT,
+        created_at TEXT
+    );
 
-def generate_trrn():
-    return "TRRN" + "".join(random.choices(string.digits, k=12))
+    CREATE TABLE IF NOT EXISTS corrections (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        employee_id INTEGER,
+        field_name TEXT,
+        old_value TEXT,
+        new_value TEXT,
+        reason TEXT,
+        status TEXT DEFAULT 'Pending',
+        created_at TEXT
+    );
 
+    CREATE TABLE IF NOT EXISTS notices (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        title TEXT,
+        description TEXT,
+        due_date TEXT,
+        status TEXT DEFAULT 'Open',
+        response TEXT
+    );
 
-def generate_member_id():
-    company_code = st.session_state.company["code"]
-    suffix = "".join(random.choices(string.digits, k=8))
-    return f"{company_code}{suffix}"
+    CREATE TABLE IF NOT EXISTS audit_logs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        username TEXT,
+        action TEXT,
+        module TEXT,
+        created_at TEXT
+    );
 
+    CREATE TABLE IF NOT EXISTS notifications (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        message TEXT,
+        status TEXT DEFAULT 'Unread',
+        created_at TEXT
+    );
+    """)
 
-def add_log(message):
-    st.session_state.logs.insert(
-        0,
-        {
-            "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "activity": message,
-        },
-    )
-
-
-def calc_contribution(basic):
-    """
-    Demo calculation only.
-
-    Employee EPF = 12% of EPF wages
-    Employer EPF = 3.67%
-    EPS = 8.33%
-    EDLI = 0.5%
-
-    This is a training calculation and should NOT be treated
-    as official statutory calculation for actual filing.
-    """
-    epf_wages = min(float(basic), 15000)
-    eps_wages = min(float(basic), 15000)
-    edli_wages = min(float(basic), 15000)
-
-    employee = round(epf_wages * 0.12, 2)
-    eps = round(eps_wages * 0.0833, 2)
-    employer_epf = round(eps_wages * 0.0367, 2)
-    edli = round(edli_wages * 0.005, 2)
-
-    employer_total = round(employer_epf + eps, 2)
-
-    return {
-        "epf_wages": epf_wages,
-        "eps_wages": eps_wages,
-        "edli_wages": edli_wages,
-        "employee": employee,
-        "employer_epf": employer_epf,
-        "eps": eps,
-        "edli": edli,
-        "employer_total": employer_total,
-        "total": round(employee + employer_total + edli, 2),
-    }
-
-
-def employee_dataframe():
-    if not st.session_state.employees:
-        return pd.DataFrame()
-
-    rows = []
-
-    for e in st.session_state.employees:
-        c = calc_contribution(e["basic"])
-
-        rows.append(
-            {
-                "Member ID": e["member_id"],
-                "Name": e["name"],
-                "UAN": e["uan"],
-                "DOJ": e["doj"],
-                "DOE": e["doe"],
-                "Basic": e["basic"],
-                "EPF Wages": c["epf_wages"],
-                "Employee PF": c["employee"],
-                "Employer PF": c["employer_total"],
-                "KYC": e["kyc"],
-                "Status": e["status"],
-            }
+    # Demo login
+    if not cur.execute(
+        "SELECT id FROM users WHERE username='demoemployer'"
+    ).fetchone():
+        cur.execute(
+            "INSERT INTO users(username,password,role) VALUES(?,?,?)",
+            ("demoemployer", hash_password("demo123"), "Employer")
         )
 
-    return pd.DataFrame(rows)
+    # Demo establishment
+    if not cur.execute(
+        "SELECT id FROM establishments WHERE code='DEMO001'"
+    ).fetchone():
+        cur.execute("""
+        INSERT INTO establishments
+        (code,name,pan,address,state,district,pin,email,mobile,constitution)
+        VALUES (?,?,?,?,?,?,?,?,?,?)
+        """, (
+            "DEMO001",
+            "ABC Technologies Pvt. Ltd. - DEMO",
+            "ABCDE1234F",
+            "Demo Industrial Area",
+            "Haryana",
+            "Gurugram",
+            "122001",
+            "demo@example.invalid",
+            "9999999999",
+            "Private Limited"
+        ))
+
+    con.commit()
+    con.close()
 
 
-def csv_download(df):
-    return df.to_csv(index=False).encode("utf-8")
+def hash_password(password):
+    return hashlib.sha256(password.encode()).hexdigest()
 
 
-# ============================================================
-# Login
-# ============================================================
+def execute(sql, params=(), fetch=False):
+    con = db()
+    cur = con.cursor()
+    cur.execute(sql, params)
+    rows = cur.fetchall() if fetch else None
+    con.commit()
+    con.close()
+    return rows
 
-if not st.session_state.logged_in:
 
+def log_action(action, module):
+    execute("""
+        INSERT INTO audit_logs(username,action,module,created_at)
+        VALUES(?,?,?,?)
+    """, (
+        st.session_state.get("username", "demo"),
+        action,
+        module,
+        datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    ))
+
+
+# =========================================================
+# LOGIN
+# =========================================================
+
+def login():
     st.markdown(
         """
         <div style="
-            background:linear-gradient(90deg,#064e3b,#047857);
-            padding:25px;
-            border-radius:12px;
-            color:white;
-            text-align:center;
-        ">
-            <h1>🏢 EPFO Employer Portal</h1>
-            <p style="font-size:18px;">
-                Training / Simulation Environment
-            </p>
+        max-width:650px;
+        margin:60px auto 20px auto;
+        padding:30px;
+        border-radius:15px;
+        background:#ffffff;
+        box-shadow:0 4px 20px rgba(0,0,0,.12);
+        text-align:center;">
+        <h1 style="color:#1261a0;">EPFO Employer</h1>
+        <h3>Training / Demo Portal</h3>
+        <p>Not an official EPFO website</p>
         </div>
         """,
-        unsafe_allow_html=True,
+        unsafe_allow_html=True
     )
 
-    st.warning(
-        "DEMO ONLY — This application is not connected to EPFO. "
-        "Do not enter real EPFO passwords, OTPs, Aadhaar, PAN or bank details."
-    )
+    with st.form("login"):
+        username = st.text_input("Employer User ID")
+        password = st.text_input("Password", type="password")
+        captcha = st.text_input("Demo Captcha", value="1234")
 
-    st.markdown("### Employer Login")
+        submitted = st.form_submit_button("Sign In")
 
-    col1, col2, col3 = st.columns([1, 2, 1])
+        if submitted:
+            user = execute(
+                "SELECT * FROM users WHERE username=? AND password=? AND active=1",
+                (username, hash_password(password)),
+                fetch=True
+            )
 
-    with col2:
-        username = st.text_input(
-            "Employer User ID",
-            value="DEMOEMP001",
-        )
-
-        password = st.text_input(
-            "Password",
-            type="password",
-            value="demo123",
-        )
-
-        captcha = st.text_input(
-            "Captcha",
-            value="DEMO",
-        )
-
-        st.caption("Demo credentials: DEMOEMP001 / demo123 / DEMO")
-
-        if st.button(
-            "🔐 Login",
-            type="primary",
-            use_container_width=True,
-        ):
-            if username == "DEMOEMP001" and password == "demo123":
-                st.session_state.logged_in = True
+            if user and captcha == "1234":
+                st.session_state.logged = True
                 st.session_state.username = username
-                add_log("Employer logged in")
+                st.session_state.role = user[0][3]
+                log_action("Login", "Authentication")
                 st.rerun()
             else:
-                st.error("Invalid demo credentials.")
-
-        c1, c2 = st.columns(2)
-
-        with c1:
-            if st.button("Forgot Password"):
-                st.info("Demo: Password reset workflow opened.")
-
-        with c2:
-            if st.button("Account Unlock"):
-                st.info("Demo: Account unlock request created.")
-
-    st.stop()
+                st.error("Invalid demo credentials or captcha.")
 
 
-# ============================================================
-# Sidebar
-# ============================================================
+# =========================================================
+# HELPERS
+# =========================================================
 
-company = st.session_state.company
+def header(title, subtitle=""):
+    st.markdown(f"## {title}")
+    if subtitle:
+        st.caption(subtitle)
 
-st.sidebar.markdown(
-    """
-    <div style="
-        background:#064e3b;
+
+def status_badge(status):
+    colors = {
+        "Active": "#198754",
+        "Approved": "#198754",
+        "Paid": "#198754",
+        "Success": "#198754",
+        "Pending": "#fd7e14",
+        "Open": "#dc3545",
+        "Rejected": "#dc3545",
+        "Failed": "#dc3545",
+        "Draft": "#6c757d",
+        "Unpaid": "#dc3545",
+    }
+
+    color = colors.get(status, "#6c757d")
+
+    st.markdown(
+        f"""
+        <span style="
+        background:{color};
         color:white;
-        padding:15px;
-        border-radius:10px;
-        text-align:center;
-    ">
-        <h3>EPFO Employer</h3>
-        <small>Training Demo</small>
-    </div>
-    """,
-    unsafe_allow_html=True,
-)
-
-st.sidebar.write(f"**Establishment:** {company['code']}")
-st.sidebar.write(f"**Employer:** {st.session_state.username}")
-
-menu = st.sidebar.radio(
-    "MENU",
-    [
-        "🏠 Dashboard",
-        "1️⃣ Establishment Registration",
-        "2️⃣ Employer Login",
-        "3️⃣ Establishment / Profile",
-        "4️⃣ Employee / Member",
-        "5️⃣ KYC",
-        "6️⃣ UAN Management",
-        "7️⃣ Salary / Contribution",
-        "8️⃣ ECR Filing",
-        "9️⃣ ECR Errors",
-        "🔟 Challan / TRRN",
-        "1️⃣1️⃣ Payment Reconciliation",
-        "1️⃣2️⃣ Employee Exit",
-        "1️⃣3️⃣ Transfer / Previous Employment",
-        "1️⃣4️⃣ Online Services",
-        "1️⃣5️⃣ Compliance Dashboard",
-        "1️⃣6️⃣ Downloads",
-        "1️⃣7️⃣ Reports",
-        "1️⃣8️⃣ Corrections",
-        "1️⃣9️⃣ Notices / e-Proceedings",
-        "2️⃣0️⃣ Special Modules",
-        "⚙️ Settings / Reset",
-    ],
-)
-
-if st.sidebar.button("🚪 Logout", use_container_width=True):
-    st.session_state.logged_in = False
-    st.session_state.username = ""
-    st.rerun()
-
-
-# ============================================================
-# Header
-# ============================================================
-
-st.title("EPFO Employer Portal")
-st.caption(
-    "Training & Simulation Demo • Dummy Data • Not connected to EPFO"
-)
-
-st.divider()
-
-
-# ============================================================
-# 0. Dashboard
-# ============================================================
-
-if menu == "🏠 Dashboard":
-
-    st.subheader("Employer Dashboard")
-
-    active = len(
-        [e for e in st.session_state.employees if e["status"] == "Active"]
+        padding:4px 10px;
+        border-radius:15px;
+        font-size:12px;">
+        {status}
+        </span>
+        """,
+        unsafe_allow_html=True
     )
 
-    pending_kyc = len(
-        [e for e in st.session_state.employees if e["kyc"] == "Pending"]
+
+def employees_df():
+    rows = execute("""
+        SELECT id,member_id,uan,name,dob,doj,doe,basic,status
+        FROM employees
+        ORDER BY id DESC
+    """, fetch=True)
+
+    return pd.DataFrame(
+        rows,
+        columns=[
+            "ID","Member ID","UAN","Name",
+            "DOB","DOJ","DOE","Basic","Status"
+        ]
     )
 
-    pending_ecr = len(
-        [x for x in st.session_state.ecr if x["status"] != "Paid"]
-    )
 
-    paid_challans = len(
-        [x for x in st.session_state.challans if x["status"] == "Paid"]
-    )
+# =========================================================
+# DASHBOARD
+# =========================================================
 
-    c1, c2, c3, c4 = st.columns(4)
+def dashboard():
+    header("🏠 Dashboard", "Employer overview")
 
-    c1.metric("Active Employees", active)
-    c2.metric("Pending KYC", pending_kyc)
-    c3.metric("Pending ECR", pending_ecr)
-    c4.metric("Paid Challans", paid_challans)
+    employees = execute(
+        "SELECT COUNT(*) FROM employees",
+        fetch=True
+    )[0][0]
 
-    st.subheader("Alerts and To Do Tasks")
+    active = execute(
+        "SELECT COUNT(*) FROM employees WHERE status='Active'",
+        fetch=True
+    )[0][0]
 
-    alerts = []
+    pending_kyc = execute(
+        "SELECT COUNT(*) FROM kyc WHERE status='Pending'",
+        fetch=True
+    )[0][0]
 
-    if pending_kyc:
-        alerts.append(f"⚠️ {pending_kyc} employee KYC item(s) pending.")
+    pending_ecr = execute(
+        "SELECT COUNT(*) FROM ecr WHERE status!='Submitted'",
+        fetch=True
+    )[0][0]
 
-    if not st.session_state.ecr:
-        alerts.append("📄 Monthly ECR has not been created in this demo.")
+    unpaid = execute(
+        "SELECT COUNT(*) FROM challans WHERE status='Unpaid'",
+        fetch=True
+    )[0][0]
 
-    if not alerts:
-        alerts.append("✅ No pending demo tasks.")
+    c1,c2,c3,c4,c5 = st.columns(5)
 
-    for alert in alerts:
-        st.info(alert)
+    c1.metric("Total Members", employees)
+    c2.metric("Active Members", active)
+    c3.metric("KYC Pending", pending_kyc)
+    c4.metric("ECR Pending", pending_ecr)
+    c5.metric("Unpaid Challans", unpaid)
 
-    st.subheader("Recent Activity")
+    st.divider()
 
-    if st.session_state.logs:
-        st.dataframe(
-            pd.DataFrame(st.session_state.logs[:10]),
-            use_container_width=True,
-            hide_index=True,
-        )
-    else:
-        st.info("No activity yet.")
+    col1,col2 = st.columns(2)
 
+    with col1:
+        st.subheader("Alerts & To-Do")
+        if pending_kyc:
+            st.warning(f"{pending_kyc} KYC verification(s) pending.")
+        if pending_ecr:
+            st.warning(f"{pending_ecr} return(s) pending.")
+        if unpaid:
+            st.error(f"{unpaid} challan(s) unpaid.")
+        if not any([pending_kyc,pending_ecr,unpaid]):
+            st.success("No demo pending tasks.")
 
-# ============================================================
-# 1. Establishment Registration
-# ============================================================
+    with col2:
+        st.subheader("Establishment")
 
-elif menu == "1️⃣ Establishment Registration":
-
-    st.subheader("Establishment Registration — Demo")
-
-    st.info(
-        "This is a simulated registration form. It does not submit "
-        "anything to EPFO."
-    )
-
-    with st.form("registration"):
-
-        name = st.text_input(
-            "Establishment Name",
-            company["name"],
-        )
-
-        constitution = st.selectbox(
-            "Constitution",
-            [
-                "Private Limited Company",
-                "Public Limited Company",
-                "Partnership",
-                "LLP",
-                "Proprietorship",
-                "Trust",
-                "Society",
-            ],
+        est = execute(
+            "SELECT code,name,status FROM establishments LIMIT 1",
+            fetch=True
         )
 
-        pan = st.text_input("PAN", company["pan"])
+        if est:
+            st.write("**Code:**", est[0][0])
+            st.write("**Name:**", est[0][1])
+            st.write("**Status:**", est[0][2])
 
-        address = st.text_area(
-            "Registered Address",
-            company["address"],
+
+# =========================================================
+# ESTABLISHMENT
+# =========================================================
+
+def establishment():
+    header("🏢 Establishment")
+
+    tabs = st.tabs([
+        "Profile",
+        "Employer Details",
+        "Authorized Signatory",
+        "Bank Details",
+        "Change Request"
+    ])
+
+    est = execute(
+        "SELECT * FROM establishments WHERE code='DEMO001'",
+        fetch=True
+    )[0]
+
+    with tabs[0]:
+        st.subheader("Establishment Profile")
+
+        with st.form("estprofile"):
+            name = st.text_input("Establishment Name", est[2])
+            pan = st.text_input("PAN", est[3])
+            address = st.text_area("Address", est[4])
+            state = st.text_input("State", est[5])
+            district = st.text_input("District", est[6])
+            pin = st.text_input("PIN", est[7])
+            constitution = st.selectbox(
+                "Constitution",
+                ["Private Limited","Partnership","Proprietorship","LLP"],
+                index=0
+            )
+
+            if st.form_submit_button("Save Profile"):
+                execute("""
+                    UPDATE establishments
+                    SET name=?,pan=?,address=?,state=?,
+                        district=?,pin=?,constitution=?
+                    WHERE id=?
+                """, (
+                    name,pan,address,state,district,
+                    pin,constitution,est[0]
+                ))
+
+                log_action("Update establishment profile","Establishment")
+                st.success("Profile updated in demo database.")
+                st.rerun()
+
+    with tabs[1]:
+        st.subheader("Employer / Contact")
+
+        st.info(f"Email: {est[8]}")
+        st.info(f"Mobile: {est[9]}")
+        st.info(f"Establishment Code: {est[1]}")
+        st.info(f"Status: {est[11]}")
+
+    with tabs[2]:
+        st.subheader("Authorized Signatory")
+
+        name = st.text_input("Authorized Person")
+        designation = st.text_input("Designation")
+        email = st.text_input("Email")
+
+        if st.button("Add Authorized Signatory"):
+            if name:
+                execute("""
+                    INSERT INTO notifications(message,created_at)
+                    VALUES(?,?)
+                """, (
+                    f"Authorized signatory '{name}' added — DEMO",
+                    datetime.now().isoformat()
+                ))
+                log_action("Add authorized signatory","Establishment")
+                st.success("Authorized signatory added in demo.")
+
+    with tabs[3]:
+        st.subheader("Bank Details — Demo")
+
+        bank = st.selectbox(
+            "Bank",
+            ["Demo Bank","State Bank — Demo","HDFC — Demo","ICICI — Demo"]
+        )
+        account = st.text_input("Account Number — Demo", type="password")
+        ifsc = st.text_input("IFSC — Demo")
+
+        if st.button("Save Bank Details"):
+            st.success("Bank details saved as demo data.")
+
+    with tabs[4]:
+        st.subheader("Profile Change Request")
+
+        reason = st.text_area("Reason")
+        if st.button("Submit Change Request"):
+            if reason:
+                execute("""
+                    INSERT INTO corrections
+                    (employee_id,field_name,old_value,new_value,reason,created_at)
+                    VALUES(NULL,'ESTABLISHMENT','','',?,?)
+                """, (
+                    reason,
+                    datetime.now().isoformat()
+                ))
+                st.success("Request submitted — DEMO.")
+
+
+# =========================================================
+# MEMBERS
+# =========================================================
+
+def members():
+    header("👥 Member Management")
+
+    tabs = st.tabs([
+        "Member List",
+        "Register Individual",
+        "Register Bulk",
+        "Approvals",
+        "Member Search"
+    ])
+
+    with tabs[0]:
+        df = employees_df()
+
+        if len(df):
+            st.dataframe(
+                df,
+                use_container_width=True,
+                hide_index=True
+            )
+
+            selected = st.selectbox(
+                "Select Employee",
+                df["ID"].tolist()
+            )
+
+            if st.button("View Member"):
+                employee_detail(selected)
+        else:
+            st.info("No members available.")
+
+    with tabs[1]:
+        add_employee()
+
+    with tabs[2]:
+        bulk_register()
+
+    with tabs[3]:
+        approvals()
+
+    with tabs[4]:
+        search_member()
+
+
+def add_employee():
+    st.subheader("Register - Individual")
+
+    with st.form("employee_form"):
+
+        name = st.text_input("Employee Name")
+        dob = st.date_input(
+            "Date of Birth",
+            value=date(1995,1,1)
+        )
+        gender = st.selectbox(
+            "Gender",
+            ["Male","Female","Other"]
+        )
+        father = st.text_input("Father / Spouse Name")
+        doj = st.date_input(
+            "Date of Joining",
+            value=date.today()
         )
 
-        state = st.selectbox(
-            "State",
-            [
-                "Haryana",
-                "Delhi",
-                "Maharashtra",
-                "Karnataka",
-                "Tamil Nadu",
-                "Uttar Pradesh",
-                "Other",
-            ],
+        previous = st.radio(
+            "Previous Employment?",
+            ["No","Yes"]
         )
 
-        authorized = st.text_input(
-            "Authorized Signatory",
-            "Demo Authorized Person",
-        )
+        existing_uan = ""
+        if previous == "Yes":
+            existing_uan = st.text_input(
+                "Existing UAN — Demo"
+            )
 
-        mobile = st.text_input(
-            "Mobile",
-            company["mobile"],
-        )
-
-        email = st.text_input(
-            "Email",
-            company["email"],
+        basic = st.number_input(
+            "Basic Wages",
+            min_value=0.0,
+            value=30000.0
         )
 
         submitted = st.form_submit_button(
-            "Submit Registration — DEMO",
-            type="primary",
+            "Register Employee"
         )
 
         if submitted:
 
-            company.update(
-                {
-                    "name": name,
-                    "constitution": constitution,
-                    "pan": pan,
-                    "address": address,
-                    "mobile": mobile,
-                    "email": email,
-                }
+            if not name:
+                st.error("Employee name required.")
+                return
+
+            # Demo UAN
+            uan = existing_uan.strip()
+
+            if not uan:
+                uan = str(
+                    random.randint(
+                        100000000000,
+                        999999999999
+                    )
+                )
+
+            member_id = (
+                "DEMO001"
+                + str(
+                    random.randint(
+                        100000,
+                        999999
+                    )
+                )
             )
 
-            add_log("Demo establishment registration submitted")
+            execute("""
+                INSERT INTO employees
+                (establishment_id,member_id,uan,name,dob,
+                 gender,father_name,doj,basic,epf_wages,
+                 eps_wages,edli_wages,status)
+                VALUES(1,?,?,?,?,?,?,?,?,?,?,?,?)
+            """, (
+                member_id,
+                uan,
+                name,
+                dob.isoformat(),
+                gender,
+                father,
+                doj.isoformat(),
+                basic,
+                basic,
+                basic,
+                basic,
+                "Active"
+            ))
 
-            st.success(
-                "Demo registration submitted successfully."
-            )
+            log_action("Register employee","Member")
 
-            st.code(
-                f"""
-Application Number : DEMO-REG-2026-001
-Establishment Code : {company['code']}
-Status             : Demo Submitted
-State              : {state}
-                """
-            )
+            st.success("Employee registered successfully.")
+            st.info(f"Demo UAN: {uan}")
+            st.info(f"Demo Member ID: {member_id}")
 
 
-# ============================================================
-# 2. Employer Login
-# ============================================================
+def bulk_register():
+    st.subheader("Register - Bulk")
 
-elif menu == "2️⃣ Employer Login":
+    template = pd.DataFrame({
+        "name":["Rahul Sharma","Priya Verma"],
+        "dob":["1995-01-01","1996-02-02"],
+        "gender":["Male","Female"],
+        "father_name":["Demo Father","Demo Father"],
+        "doj":["2026-04-01","2026-04-01"],
+        "basic":[30000,35000]
+    })
 
-    st.subheader("Employer Login Information")
-
-    st.success("You are currently logged in.")
-
-    st.write("**Demo User ID:**", st.session_state.username)
-    st.write("**Establishment Code:**", company["code"])
-
-    st.info(
-        "Actual EPFO password/OTP functionality is intentionally "
-        "not implemented in this training clone."
+    st.download_button(
+        "Download Demo Template",
+        template.to_csv(index=False),
+        "employee_template.csv",
+        "text/csv"
     )
 
-    if st.button("Simulate Password Change"):
-        add_log("Demo password-change workflow opened")
-        st.success("Demo password changed successfully.")
+    uploaded = st.file_uploader(
+        "Upload CSV",
+        type=["csv"]
+    )
+
+    if uploaded:
+
+        df = pd.read_csv(uploaded)
+
+        st.subheader("Preview")
+        st.dataframe(df,use_container_width=True)
+
+        required = [
+            "name","dob","gender",
+            "father_name","doj","basic"
+        ]
+
+        missing = [
+            x for x in required
+            if x not in df.columns
+        ]
+
+        if missing:
+            st.error(
+                "Missing columns: "
+                + ", ".join(missing)
+            )
+        else:
+            st.success(
+                f"{len(df)} rows validated for demo."
+            )
+
+            if st.button("Create Demo Members"):
+                count = 0
+
+                for _,row in df.iterrows():
+
+                    uan = str(
+                        random.randint(
+                            100000000000,
+                            999999999999
+                        )
+                    )
+
+                    member = (
+                        "DEMO001"
+                        + str(
+                            random.randint(
+                                100000,
+                                999999
+                            )
+                        )
+                    )
+
+                    execute("""
+                    INSERT INTO employees
+                    (establishment_id,member_id,uan,name,
+                     dob,gender,father_name,doj,basic,
+                     epf_wages,eps_wages,edli_wages)
+                    VALUES(1,?,?,?,?,?,?,?,?,?,?,?)
+                    """,(
+                        member,
+                        uan,
+                        str(row["name"]),
+                        str(row["dob"]),
+                        str(row["gender"]),
+                        str(row["father_name"]),
+                        str(row["doj"]),
+                        float(row["basic"]),
+                        float(row["basic"]),
+                        float(row["basic"]),
+                        float(row["basic"])
+                    ))
+
+                    count += 1
+
+                log_action(
+                    f"Bulk registered {count} members",
+                    "Member"
+                )
+
+                st.success(
+                    f"{count} demo members created."
+                )
 
 
-# ============================================================
-# 3. Establishment Profile
-# ============================================================
+def search_member():
+    st.subheader("Member Search")
 
-elif menu == "3️⃣ Establishment / Profile":
+    query = st.text_input(
+        "Name / UAN / Member ID"
+    )
 
-    st.subheader("Establishment Profile")
+    if query:
+        rows = execute("""
+            SELECT id,member_id,uan,name,doj,status
+            FROM employees
+            WHERE name LIKE ?
+               OR uan LIKE ?
+               OR member_id LIKE ?
+        """, (
+            f"%{query}%",
+            f"%{query}%",
+            f"%{query}%"
+        ), fetch=True)
 
-    with st.form("profile"):
-
-        company["name"] = st.text_input(
-            "Establishment Name",
-            company["name"],
+        df = pd.DataFrame(
+            rows,
+            columns=[
+                "ID","Member ID","UAN",
+                "Name","DOJ","Status"
+            ]
         )
 
-        company["pan"] = st.text_input(
-            "PAN",
-            company["pan"],
+        st.dataframe(
+            df,
+            use_container_width=True,
+            hide_index=True
         )
 
-        company["address"] = st.text_area(
-            "Address",
-            company["address"],
+
+def employee_detail(employee_id):
+
+    row = execute("""
+        SELECT * FROM employees WHERE id=?
+    """,(employee_id,),fetch=True)
+
+    if not row:
+        return
+
+    e = row[0]
+
+    st.subheader("Member Profile")
+
+    c1,c2,c3 = st.columns(3)
+
+    c1.metric("Member ID",e[2])
+    c2.metric("UAN",e[3])
+    c3.metric("Status",e[13])
+
+    tabs = st.tabs([
+        "Personal",
+        "Employment",
+        "UAN",
+        "KYC",
+        "Payroll",
+        "Exit",
+        "Correction",
+        "History"
+    ])
+
+    with tabs[0]:
+        st.write("**Name:**",e[4])
+        st.write("**DOB:**",e[5])
+        st.write("**Gender:**",e[6])
+        st.write("**Father/Spouse:**",e[7])
+
+    with tabs[1]:
+        st.write("**DOJ:**",e[8])
+        st.write("**DOE:**",e[9])
+        st.write("**Basic:**",e[10])
+
+    with tabs[2]:
+        st.info(f"Demo UAN: {e[3]}")
+        st.info("UAN status: Active — DEMO")
+
+    with tabs[3]:
+        k = execute("""
+            SELECT aadhaar,pan,bank,ifsc,status
+            FROM kyc WHERE employee_id=?
+        """,(employee_id,),fetch=True)
+
+        if k:
+            st.write("Aadhaar:", mask(k[0][0]))
+            st.write("PAN:", mask(k[0][1]))
+            st.write("Bank:", mask(k[0][2]))
+            st.write("IFSC:", k[0][3])
+            status_badge(k[0][4])
+        else:
+            st.warning("KYC not submitted.")
+
+    with tabs[4]:
+        payroll_df(employee_id)
+
+    with tabs[5]:
+        exit_employee(employee_id)
+
+    with tabs[6]:
+        correction(employee_id)
+
+    with tabs[7]:
+        st.info("Audit/history available in Audit Trail.")
+
+
+def mask(value):
+    if not value:
+        return "Not Available"
+    value = str(value)
+    return "*" * max(0,len(value)-4) + value[-4:]
+
+
+# =========================================================
+# KYC
+# =========================================================
+
+def kyc():
+    header("🪪 KYC Management")
+
+    employees = execute(
+        "SELECT id,name,uan FROM employees",
+        fetch=True
+    )
+
+    if not employees:
+        st.info("Add an employee first.")
+        return
+
+    df = pd.DataFrame(
+        employees,
+        columns=["ID","Employee","UAN"]
+    )
+
+    st.dataframe(
+        df,
+        use_container_width=True,
+        hide_index=True
+    )
+
+    selected = st.selectbox(
+        "Employee",
+        [(x[0],x[1]) for x in employees],
+        format_func=lambda x:x[1]
+    )[0]
+
+    with st.form("kycform"):
+
+        aadhaar = st.text_input(
+            "Aadhaar — DEMO ONLY"
+        )
+        pan = st.text_input(
+            "PAN — DEMO ONLY"
+        )
+        bank = st.text_input(
+            "Bank Account — DEMO ONLY"
+        )
+        ifsc = st.text_input(
+            "IFSC — DEMO"
         )
 
-        company["constitution"] = st.selectbox(
-            "Constitution",
-            [
-                "Private Limited Company",
-                "Public Limited Company",
-                "Partnership",
-                "LLP",
-                "Proprietorship",
-            ],
-            index=0,
+        submit = st.form_submit_button(
+            "Submit KYC"
         )
 
-        company["mobile"] = st.text_input(
-            "Mobile",
-            company["mobile"],
-        )
+        if submit:
 
-        company["email"] = st.text_input(
-            "Email",
-            company["email"],
-        )
+            old = execute(
+                "SELECT id FROM kyc WHERE employee_id=?",
+                (selected,),
+                fetch=True
+            )
 
-        if st.form_submit_button(
-            "Save Profile",
-            type="primary",
-        ):
-            add_log("Establishment profile updated")
-            st.success("Profile saved in demo session.")
+            if old:
+                execute("""
+                    UPDATE kyc
+                    SET aadhaar=?,pan=?,bank=?,ifsc=?,
+                        status='Pending'
+                    WHERE employee_id=?
+                """,(
+                    aadhaar,pan,bank,ifsc,selected
+                ))
+            else:
+                execute("""
+                    INSERT INTO kyc
+                    (employee_id,aadhaar,pan,bank,ifsc)
+                    VALUES(?,?,?,?,?)
+                """,(
+                    selected,aadhaar,pan,bank,ifsc
+                ))
+
+            log_action("Submit KYC","KYC")
+
+            st.success(
+                "KYC submitted — DEMO status Pending."
+            )
 
     st.divider()
 
-    st.write("### Establishment Status")
+    st.subheader("KYC Verification")
 
-    c1, c2, c3 = st.columns(3)
+    pending = execute("""
+        SELECT k.id,e.name,e.uan,k.status
+        FROM kyc k
+        JOIN employees e ON e.id=k.employee_id
+        WHERE k.status='Pending'
+    """,fetch=True)
 
-    c1.metric("Establishment Code", company["code"])
-    c2.metric("Status", company["status"])
-    c3.metric("Constitution", company["constitution"])
+    for k in pending:
+        c1,c2,c3,c4 = st.columns(4)
+
+        c1.write(k[1])
+        c2.write(k[2])
+        c3.write(k[3])
+
+        if c4.button(
+            "Approve",
+            key=f"k{ k[0] }"
+        ):
+            execute(
+                "UPDATE kyc SET status='Approved' WHERE id=?",
+                (k[0],)
+            )
+            log_action("Approve KYC","KYC")
+            st.rerun()
 
 
-# ============================================================
-# 4. Employee / Member
-# ============================================================
+# =========================================================
+# PAYROLL
+# =========================================================
 
-elif menu == "4️⃣ Employee / Member":
+def payroll():
+    header("💰 Payroll / Contribution")
 
-    st.subheader("Employee / Member Management")
+    employees = execute("""
+        SELECT id,name,basic
+        FROM employees
+        WHERE status='Active'
+    """,fetch=True)
 
-    tab1, tab2 = st.tabs(
-        [
-            "➕ Add Employee",
-            "📋 Employee List",
-        ]
+    if not employees:
+        st.info("No active employees.")
+        return
+
+    month = st.text_input(
+        "Wage Month",
+        value=datetime.now().strftime("%Y-%m")
     )
 
-    with tab1:
+    for e in employees:
 
-        with st.form("add_employee"):
-
-            name = st.text_input("Employee Name")
-
-            dob = st.date_input(
-                "Date of Birth",
-                date(1995, 1, 1),
-            )
-
-            gender = st.selectbox(
-                "Gender",
-                ["Male", "Female", "Other"],
-            )
-
-            doj = st.date_input(
-                "Date of Joining",
-                date.today(),
-            )
+        with st.expander(
+            f"{e[1]} | Basic ₹{e[2]:,.2f}"
+        ):
 
             basic = st.number_input(
                 "Basic Wages",
                 min_value=0.0,
-                value=30000.0,
-                step=500.0,
+                value=float(e[2]),
+                key=f"basic_{e[0]}"
             )
 
-            existing = st.radio(
-                "Previous UAN?",
-                [
-                    "Yes — Existing UAN",
-                    "No — Generate Demo UAN",
-                ],
+            epf = st.number_input(
+                "EPF Wages",
+                min_value=0.0,
+                value=float(e[2]),
+                key=f"epf_{e[0]}"
             )
 
-            old_uan = ""
+            eps = st.number_input(
+                "EPS Wages",
+                min_value=0.0,
+                value=float(e[2]),
+                key=f"eps_{e[0]}"
+            )
 
-            if existing.startswith("Yes"):
-                old_uan = st.text_input(
-                    "Existing UAN",
-                    "100000000099",
+            edli = st.number_input(
+                "EDLI Wages",
+                min_value=0.0,
+                value=float(e[2]),
+                key=f"edli_{e[0]}"
+            )
+
+            ncp = st.number_input(
+                "NCP Days",
+                min_value=0.0,
+                value=0.0,
+                key=f"ncp_{e[0]}"
+            )
+
+            emp_share, employer, eps_share, edli_share = calculate(
+                epf,eps,edli
+            )
+
+            c1,c2,c3,c4 = st.columns(4)
+
+            c1.metric(
+                "Employee Share",
+                f"₹{emp_share:,.2f}"
+            )
+
+            c2.metric(
+                "Employer Share",
+                f"₹{employer:,.2f}"
+            )
+
+            c3.metric(
+                "EPS",
+                f"₹{eps_share:,.2f}"
+            )
+
+            c4.metric(
+                "EDLI",
+                f"₹{edli_share:,.2f}"
+            )
+
+            if st.button(
+                "Save Payroll",
+                key=f"savepay_{e[0]}"
+            ):
+
+                execute("""
+                INSERT INTO payroll
+                (employee_id,month,basic,epf_wages,
+                 eps_wages,edli_wages,employee_share,
+                 employer_share,eps_share,edli_share,ncp)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?)
+                """,(
+                    e[0],month,basic,epf,eps,edli,
+                    emp_share,employer,
+                    eps_share,edli_share,ncp
+                ))
+
+                log_action(
+                    f"Payroll saved for {e[1]}",
+                    "Payroll"
                 )
 
-            aadhaar = st.selectbox(
-                "Aadhaar KYC",
-                ["Pending", "Verified", "Rejected"],
+                st.success("Payroll saved.")
+
+
+def calculate(epf,eps,edli):
+
+    # TRAINING DEMO calculation.
+    # Not a substitute for current EPFO statutory calculation.
+    employee_share = round(epf * 0.12,2)
+
+    eps_share = round(
+        min(eps,15000) * 0.0833,
+        2
+    )
+
+    employer = round(
+        max(employee_share - eps_share,0),
+        2
+    )
+
+    edli_share = round(
+        min(edli,15000) * 0.005,
+        2
+    )
+
+    return (
+        employee_share,
+        employer,
+        eps_share,
+        edli_share
+    )
+
+
+def payroll_df(employee_id):
+
+    rows = execute("""
+        SELECT month,basic,epf_wages,employee_share,
+               employer_share,eps_share,edli_share,ncp
+        FROM payroll
+        WHERE employee_id=?
+        ORDER BY id DESC
+    """,(employee_id,),fetch=True)
+
+    if rows:
+        st.dataframe(
+            pd.DataFrame(
+                rows,
+                columns=[
+                    "Month","Basic","EPF Wages",
+                    "Employee Share","Employer Share",
+                    "EPS","EDLI","NCP"
+                ]
+            ),
+            use_container_width=True,
+            hide_index=True
+        )
+    else:
+        st.info("No payroll records.")
+
+
+# =========================================================
+# ECR
+# =========================================================
+
+def ecr():
+    header("📄 ECR / Return Filing")
+
+    tabs = st.tabs([
+        "Prepare ECR",
+        "Validate",
+        "Submit",
+        "History",
+        "Errors"
+    ])
+
+    with tabs[0]:
+        month = st.text_input(
+            "Wage Month",
+            datetime.now().strftime("%Y-%m"),
+            key="ecrmonth"
+        )
+
+        rows = execute("""
+            SELECT COUNT(*),
+                   COALESCE(SUM(employee_share+employer_share+
+                                eps_share+edli_share),0)
+            FROM payroll
+            WHERE month=?
+        """,(month,),fetch=True)[0]
+
+        st.metric("Payroll Members",rows[0])
+        st.metric("Contribution Amount",f"₹{rows[1]:,.2f}")
+
+        if st.button("Create ECR Draft"):
+
+            execute("""
+                INSERT INTO ecr(month,members,amount,status)
+                VALUES(?,?,?,'Draft')
+            """,(
+                month,rows[0],rows[1]
+            ))
+
+            log_action(
+                "Create ECR draft",
+                "ECR"
             )
 
-            pan_status = st.selectbox(
-                "PAN KYC",
-                ["Pending", "Verified", "Rejected"],
+            st.success("ECR draft created.")
+
+    with tabs[1]:
+        ecr_rows = execute("""
+            SELECT id,month,members,amount,status
+            FROM ecr
+            ORDER BY id DESC
+        """,fetch=True)
+
+        for x in ecr_rows:
+
+            st.write(
+                f"**ECR #{x[0]}** | "
+                f"{x[1]} | "
+                f"Members: {x[2]} | "
+                f"₹{x[3]:,.2f}"
             )
 
-            bank = st.selectbox(
-                "Bank KYC",
-                ["Pending", "Verified", "Rejected"],
-            )
+            if st.button(
+                "Validate",
+                key=f"validate{x[0]}"
+            ):
 
-            save = st.form_submit_button(
-                "Add Employee",
-                type="primary",
-            )
-
-            if save:
-
-                uan = (
-                    old_uan
-                    if existing.startswith("Yes")
-                    else generate_uan()
+                # Demo validation
+                execute(
+                    "UPDATE ecr SET status='Validated' WHERE id=?",
+                    (x[0],)
                 )
 
-                kyc = (
-                    "Approved"
-                    if (
-                        aadhaar == "Verified"
-                        and pan_status == "Verified"
-                        and bank == "Verified"
-                    )
-                    else "Pending"
+                log_action(
+                    f"Validate ECR {x[0]}",
+                    "ECR"
                 )
 
-                emp = {
-                    "member_id": generate_member_id(),
-                    "name": name or "Demo Employee",
-                    "dob": str(dob),
-                    "gender": gender,
-                    "doj": str(doj),
-                    "doe": "",
-                    "reason": "",
-                    "uan": uan,
-                    "basic": basic,
-                    "epf_wages": min(basic, 15000),
-                    "eps_wages": min(basic, 15000),
-                    "edli_wages": min(basic, 15000),
-                    "aadhaar": aadhaar,
-                    "pan": pan_status,
-                    "bank": bank,
-                    "kyc": kyc,
-                    "status": "Active",
-                }
+                st.success("ECR validated.")
+                st.rerun()
 
-                st.session_state.employees.append(emp)
+    with tabs[2]:
 
-                add_log(
-                    f"Employee added: {emp['name']} / UAN {uan}"
+        ecr_rows = execute("""
+            SELECT id,month,members,amount,status
+            FROM ecr
+            WHERE status='Validated'
+        """,fetch=True)
+
+        for x in ecr_rows:
+
+            if st.button(
+                f"Submit ECR #{x[0]}",
+                key=f"submit{x[0]}"
+            ):
+
+                trrn = (
+                    "DEMO"
+                    + datetime.now().strftime("%Y%m%d")
+                    + str(random.randint(10000,99999))
                 )
 
-                st.success(
-                    f"Employee added. Demo UAN: {uan}"
+                execute("""
+                    UPDATE ecr
+                    SET status='Submitted',trrn=?
+                    WHERE id=?
+                """,(trrn,x[0]))
+
+                execute("""
+                    INSERT INTO challans
+                    (trrn,amount,status,created_at)
+                    VALUES(?,?,?,?)
+                """,(
+                    trrn,
+                    x[3],
+                    "Unpaid",
+                    datetime.now().isoformat()
+                ))
+
+                log_action(
+                    f"Submit ECR {x[0]} / {trrn}",
+                    "ECR"
                 )
 
-    with tab2:
+                st.success("ECR submitted — DEMO.")
+                st.info(f"Demo TRRN: {trrn}")
+                st.rerun()
 
-        df = employee_dataframe()
+    with tabs[3]:
 
-        if not df.empty:
+        rows = execute("""
+            SELECT id,month,members,amount,status,trrn
+            FROM ecr
+            ORDER BY id DESC
+        """,fetch=True)
+
+        st.dataframe(
+            pd.DataFrame(
+                rows,
+                columns=[
+                    "ID","Month","Members",
+                    "Amount","Status","TRRN"
+                ]
+            ),
+            use_container_width=True,
+            hide_index=True
+        )
+
+    with tabs[4]:
+
+        errors = execute("""
+            SELECT id,ecr_id,employee_id,error,status
+            FROM ecr_errors
+            ORDER BY id DESC
+        """,fetch=True)
+
+        if errors:
             st.dataframe(
-                df,
-                use_container_width=True,
-                hide_index=True,
-            )
-        else:
-            st.info("No employees.")
-
-
-# ============================================================
-# 5. KYC
-# ============================================================
-
-elif menu == "5️⃣ KYC":
-
-    st.subheader("KYC Management")
-
-    if not st.session_state.employees:
-        st.info("No employees available.")
-    else:
-
-        options = {
-            f"{e['name']} — {e['uan']}": i
-            for i, e in enumerate(st.session_state.employees)
-        }
-
-        selected = st.selectbox(
-            "Select Employee",
-            list(options.keys()),
-        )
-
-        idx = options[selected]
-        emp = st.session_state.employees[idx]
-
-        st.write(f"### {emp['name']}")
-
-        c1, c2, c3 = st.columns(3)
-
-        c1.metric("Aadhaar", emp["aadhaar"])
-        c2.metric("PAN", emp["pan"])
-        c3.metric("Bank", emp["bank"])
-
-        col1, col2, col3 = st.columns(3)
-
-        with col1:
-            if st.button("Verify Aadhaar"):
-                emp["aadhaar"] = "Verified"
-                add_log(f"Aadhaar verified: {emp['name']}")
-                st.rerun()
-
-        with col2:
-            if st.button("Verify PAN"):
-                emp["pan"] = "Verified"
-                add_log(f"PAN verified: {emp['name']}")
-                st.rerun()
-
-        with col3:
-            if st.button("Verify Bank"):
-                emp["bank"] = "Verified"
-                add_log(f"Bank KYC verified: {emp['name']}")
-                st.rerun()
-
-        if (
-            emp["aadhaar"] == "Verified"
-            and emp["pan"] == "Verified"
-            and emp["bank"] == "Verified"
-        ):
-            emp["kyc"] = "Approved"
-
-        st.success(f"KYC Status: {emp['kyc']}")
-
-        if st.button("Reject Demo KYC"):
-            emp["kyc"] = "Rejected"
-            add_log(f"KYC rejected: {emp['name']}")
-            st.rerun()
-
-
-# ============================================================
-# 6. UAN
-# ============================================================
-
-elif menu == "6️⃣ UAN Management":
-
-    st.subheader("UAN Management")
-
-    df = employee_dataframe()
-
-    if not df.empty:
-        st.dataframe(
-            df[["Name", "UAN", "Member ID", "Status"]],
-            use_container_width=True,
-            hide_index=True,
-        )
-
-    st.divider()
-
-    st.write("### Generate Demo UAN")
-
-    if st.button("Generate New Demo UAN"):
-
-        uan = generate_uan()
-
-        st.success(
-            f"Generated Demo UAN: {uan}"
-        )
-
-        add_log(f"Demo UAN generated: {uan}")
-
-    st.write("### UAN Linking")
-
-    uan_input = st.text_input(
-        "Enter Demo UAN"
-    )
-
-    if st.button("Check UAN"):
-
-        found = any(
-            e["uan"] == uan_input
-            for e in st.session_state.employees
-        )
-
-        if found:
-            st.success("UAN found in demo database.")
-        else:
-            st.warning("UAN not found in demo database.")
-
-
-# ============================================================
-# 7. Salary / Contribution
-# ============================================================
-
-elif menu == "7️⃣ Salary / Contribution":
-
-    st.subheader("Salary & EPF Contribution Calculator")
-
-    basic = st.number_input(
-        "Basic Wages",
-        min_value=0.0,
-        value=30000.0,
-        step=500.0,
-    )
-
-    c = calc_contribution(basic)
-
-    cols = st.columns(4)
-
-    cols[0].metric(
-        "EPF Wages",
-        money(c["epf_wages"]),
-    )
-
-    cols[1].metric(
-        "Employee PF",
-        money(c["employee"]),
-    )
-
-    cols[2].metric(
-        "Employer PF",
-        money(c["employer_total"]),
-    )
-
-    cols[3].metric(
-        "EDLI",
-        money(c["edli"]),
-    )
-
-    st.write("### Calculation Breakdown")
-
-    calc_df = pd.DataFrame(
-        [
-            ["Employee EPF", c["employee"]],
-            ["Employer EPF", c["employer_epf"]],
-            ["EPS", c["eps"]],
-            ["EDLI", c["edli"]],
-            ["Total Demo Contribution", c["total"]],
-        ],
-        columns=["Component", "Amount"],
-    )
-
-    st.dataframe(
-        calc_df,
-        use_container_width=True,
-        hide_index=True,
-    )
-
-    st.warning(
-        "These percentages/limits are simplified for demonstration. "
-        "Do not use this calculator for an actual statutory filing."
-    )
-
-
-# ============================================================
-# 8. ECR
-# ============================================================
-
-elif menu == "8️⃣ ECR Filing":
-
-    st.subheader("Monthly ECR — Demo")
-
-    month = st.selectbox(
-        "Contribution Month",
-        [
-            "April 2026",
-            "May 2026",
-            "June 2026",
-            "July 2026",
-            "August 2026",
-            "September 2026",
-        ],
-    )
-
-    active_employees = [
-        e
-        for e in st.session_state.employees
-        if e["status"] == "Active"
-    ]
-
-    if not active_employees:
-        st.warning("No active employees.")
-    else:
-
-        rows = []
-
-        for e in active_employees:
-
-            c = calc_contribution(e["basic"])
-
-            rows.append(
-                {
-                    "UAN": e["uan"],
-                    "Name": e["name"],
-                    "EPF Wages": c["epf_wages"],
-                    "EPS Wages": c["eps_wages"],
-                    "EDLI Wages": c["edli_wages"],
-                    "Employee Share": c["employee"],
-                    "Employer EPF": c["employer_epf"],
-                    "EPS": c["eps"],
-                    "EDLI": c["edli"],
-                }
-            )
-
-        ecr_df = pd.DataFrame(rows)
-
-        st.dataframe(
-            ecr_df,
-            use_container_width=True,
-            hide_index=True,
-        )
-
-        total_employee = ecr_df["Employee Share"].sum()
-        total_employer = (
-            ecr_df["Employer EPF"].sum()
-            + ecr_df["EPS"].sum()
-        )
-
-        total = (
-            total_employee
-            + total_employer
-            + ecr_df["EDLI"].sum()
-        )
-
-        c1, c2, c3 = st.columns(3)
-
-        c1.metric(
-            "Employee Share",
-            money(total_employee),
-        )
-
-        c2.metric(
-            "Employer Share",
-            money(total_employer),
-        )
-
-        c3.metric(
-            "Total Demo",
-            money(total),
-        )
-
-        if st.button(
-            "1. Validate ECR",
-            type="secondary",
-        ):
-
-            errors = []
-
-            for e in active_employees:
-
-                if len(e["uan"]) != 12:
-                    errors.append(
-                        f"{e['name']}: Invalid UAN"
-                    )
-
-                if e["basic"] <= 0:
-                    errors.append(
-                        f"{e['name']}: Invalid wages"
-                    )
-
-            if errors:
-                st.error("ECR validation failed.")
-
-                for error in errors:
-                    st.write("❌", error)
-
-            else:
-                st.success(
-                    "ECR validation successful."
-                )
-
-                st.session_state["validated_ecr"] = {
-                    "month": month,
-                    "df": ecr_df,
-                    "total": total,
-                }
-
-        if st.button(
-            "2. Submit ECR",
-            type="primary",
-        ):
-
-            if "validated_ecr" not in st.session_state:
-                st.error(
-                    "Validate ECR before submission."
-                )
-            else:
-
-                trrn = generate_trrn()
-
-                record = {
-                    "month": month,
-                    "trrn": trrn,
-                    "employees": len(active_employees),
-                    "amount": total,
-                    "status": "Submitted",
-                    "created": datetime.now().strftime(
-                        "%Y-%m-%d %H:%M:%S"
-                    ),
-                }
-
-                st.session_state.ecr.append(record)
-
-                add_log(
-                    f"ECR submitted for {month}, TRRN {trrn}"
-                )
-
-                st.success(
-                    "ECR submitted successfully in demo."
-                )
-
-                st.code(
-                    f"""
-Month : {month}
-TRRN  : {trrn}
-Amount: {money(total)}
-Status: Submitted
-                    """
-                )
-
-
-# ============================================================
-# 9. ECR Errors
-# ============================================================
-
-elif menu == "9️⃣ ECR Errors":
-
-    st.subheader("ECR Error Simulator")
-
-    error_type = st.selectbox(
-        "Select Error",
-        [
-            "Invalid UAN",
-            "Duplicate UAN",
-            "Wrong Wages",
-            "Invalid Member",
-            "DOJ Problem",
-            "DOE Problem",
-            "Missing KYC",
-            "Previous Employment Issue",
-        ],
-    )
-
-    if st.button("Simulate Error"):
-
-        solutions = {
-            "Invalid UAN":
-                "Verify the UAN format and employee record.",
-            "Duplicate UAN":
-                "Check whether the same UAN is already mapped.",
-            "Wrong Wages":
-                "Review payroll and ECR wage values.",
-            "Invalid Member":
-                "Verify Member ID and UAN mapping.",
-            "DOJ Problem":
-                "Check date of joining.",
-            "DOE Problem":
-                "Verify exit date and reason.",
-            "Missing KYC":
-                "Complete required KYC verification.",
-            "Previous Employment Issue":
-                "Verify previous employment/UAN history.",
-        }
-
-        st.error(error_type)
-        st.info(solutions[error_type])
-
-
-# ============================================================
-# 10. Challan / TRRN
-# ============================================================
-
-elif menu == "🔟 Challan / TRRN":
-
-    st.subheader("Challan / TRRN Management")
-
-    if not st.session_state.ecr:
-
-        st.info(
-            "Submit an ECR first to create a demo challan."
-        )
-
-    else:
-
-        for ecr in st.session_state.ecr:
-
-            st.write(
-                f"### {ecr['month']} — {ecr['trrn']}"
-            )
-
-            st.write(
-                f"Amount: **{money(ecr['amount'])}**"
-            )
-
-            existing = next(
-                (
-                    c
-                    for c in st.session_state.challans
-                    if c["trrn"] == ecr["trrn"]
+                pd.DataFrame(
+                    errors,
+                    columns=[
+                        "ID","ECR","Employee",
+                        "Error","Status"
+                    ]
                 ),
-                None,
+                use_container_width=True,
+                hide_index=True
             )
+        else:
+            st.success("No ECR errors in demo.")
 
-            if not existing:
+
+# =========================================================
+# CHALLAN / PAYMENT
+# =========================================================
+
+def challan_payment():
+    header("🧾 Challan / TRRN / Payment")
+
+    tabs = st.tabs([
+        "TRRN",
+        "Challans",
+        "Payment",
+        "Reconciliation"
+    ])
+
+    with tabs[0]:
+        rows = execute("""
+            SELECT trrn,month,members,amount,status
+            FROM ecr
+            WHERE trrn IS NOT NULL
+        """,fetch=True)
+
+        st.dataframe(
+            pd.DataFrame(
+                rows,
+                columns=[
+                    "TRRN","Month","Members",
+                    "Amount","ECR Status"
+                ]
+            ),
+            use_container_width=True,
+            hide_index=True
+        )
+
+    with tabs[1]:
+
+        rows = execute("""
+            SELECT id,trrn,amount,status,created_at
+            FROM challans
+            ORDER BY id DESC
+        """,fetch=True)
+
+        st.dataframe(
+            pd.DataFrame(
+                rows,
+                columns=[
+                    "ID","TRRN","Amount",
+                    "Status","Created"
+                ]
+            ),
+            use_container_width=True,
+            hide_index=True
+        )
+
+    with tabs[2]:
+
+        rows = execute("""
+            SELECT id,trrn,amount,status
+            FROM challans
+            WHERE status='Unpaid'
+        """,fetch=True)
+
+        if not rows:
+            st.success("No unpaid demo challans.")
+        else:
+            for x in rows:
+
+                st.write(
+                    f"TRRN: **{x[1]}** | "
+                    f"Amount: **₹{x[2]:,.2f}**"
+                )
 
                 if st.button(
-                    f"Generate Challan — {ecr['trrn']}",
-                    key=f"challan_{ecr['trrn']}",
+                    "Pay — DEMO",
+                    key=f"pay{x[0]}"
                 ):
 
-                    challan = {
-                        "trrn": ecr["trrn"],
-                        "challan_no":
-                            "CHL" +
-                            "".join(
-                                random.choices(
-                                    string.digits,
-                                    k=10,
-                                )
-                            ),
-                        "amount": ecr["amount"],
-                        "status": "Unpaid",
-                        "date":
-                            date.today().isoformat(),
-                    }
-
-                    st.session_state.challans.append(
-                        challan
+                    ref = (
+                        "DEMO-PAY-"
+                        + str(random.randint(
+                            100000,999999
+                        ))
                     )
 
-                    add_log(
-                        f"Challan generated: {challan['challan_no']}"
+                    execute("""
+                        INSERT INTO payments
+                        (trrn,amount,payment_ref,status,created_at)
+                        VALUES(?,?,?,?,?)
+                    """,(
+                        x[1],
+                        x[2],
+                        ref,
+                        "Success",
+                        datetime.now().isoformat()
+                    ))
+
+                    execute("""
+                        UPDATE challans
+                        SET status='Paid'
+                        WHERE id=?
+                    """,(x[0],))
+
+                    log_action(
+                        f"Demo payment {x[1]}",
+                        "Payment"
+                    )
+
+                    st.success(
+                        f"Demo payment successful. Reference: {ref}"
                     )
 
                     st.rerun()
 
-            else:
+    with tabs[3]:
 
-                st.success(
-                    f"Challan: {existing['challan_no']}"
-                )
+        rows = execute("""
+            SELECT trrn,amount,payment_ref,status,created_at
+            FROM payments
+            ORDER BY id DESC
+        """,fetch=True)
 
-                st.write(
-                    f"Status: **{existing['status']}**"
-                )
-
-                if existing["status"] == "Unpaid":
-
-                    if st.button(
-                        "Pay Challan — DEMO",
-                        key=f"pay_{existing['trrn']}",
-                        type="primary",
-                    ):
-
-                        existing["status"] = "Paid"
-
-                        add_log(
-                            f"Demo challan paid: "
-                            f"{existing['challan_no']}"
-                        )
-
-                        st.success(
-                            "Demo payment successful."
-                        )
-
-                        st.rerun()
+        if rows:
+            st.dataframe(
+                pd.DataFrame(
+                    rows,
+                    columns=[
+                        "TRRN","Amount",
+                        "Payment Ref",
+                        "Status","Date"
+                    ]
+                ),
+                use_container_width=True,
+                hide_index=True
+            )
+        else:
+            st.info("No payments.")
 
 
-# ============================================================
-# 11. Payment Reconciliation
-# ============================================================
+# =========================================================
+# EXIT
+# =========================================================
 
-elif menu == "1️⃣1️⃣ Payment Reconciliation":
+def exit_module():
+    header("🚪 Employee Exit")
 
-    st.subheader("Payment Reconciliation")
+    rows = execute("""
+        SELECT id,name,uan,doj,status
+        FROM employees
+        WHERE status='Active'
+    """,fetch=True)
 
-    if st.session_state.challans:
+    if not rows:
+        st.info("No active employees.")
+        return
 
-        df = pd.DataFrame(
-            st.session_state.challans
+    employee = st.selectbox(
+        "Employee",
+        [(x[0],x[1]) for x in rows],
+        format_func=lambda x:x[1]
+    )
+
+    doe = st.date_input(
+        "Date of Exit",
+        date.today()
+    )
+
+    reason = st.selectbox(
+        "Reason",
+        [
+            "Cessation of employment",
+            "Retirement",
+            "Resignation",
+            "Other"
+        ]
+    )
+
+    if st.button("Mark Exit — DEMO"):
+
+        execute("""
+            UPDATE employees
+            SET doe=?,exit_reason=?,status='Exited'
+            WHERE id=?
+        """,(
+            doe.isoformat(),
+            reason,
+            employee[0]
+        ))
+
+        log_action(
+            f"Employee exit {employee[1]}",
+            "Exit"
         )
 
-        st.dataframe(
-            df,
-            use_container_width=True,
-            hide_index=True,
-        )
-
-        paid = len(
-            [
-                x
-                for x in st.session_state.challans
-                if x["status"] == "Paid"
-            ]
-        )
-
-        unpaid = len(
-            [
-                x
-                for x in st.session_state.challans
-                if x["status"] != "Paid"
-            ]
-        )
-
-        c1, c2 = st.columns(2)
-
-        c1.metric("Paid", paid)
-        c2.metric("Pending", unpaid)
-
-    else:
-        st.info("No challans available.")
+        st.success("Employee marked as exited in demo.")
+        st.rerun()
 
 
-# ============================================================
-# 12. Employee Exit
-# ============================================================
-
-elif menu == "1️⃣2️⃣ Employee Exit":
+def exit_employee(employee_id):
 
     st.subheader("Employee Exit")
 
-    active = [
-        (i, e)
-        for i, e in enumerate(
-            st.session_state.employees
+    if st.button(
+        "Open Exit Workflow",
+        key=f"exitopen{employee_id}"
+    ):
+        st.info(
+            "Use the main Exit module for the complete demo workflow."
         )
-        if e["status"] == "Active"
-    ]
 
-    if not active:
 
-        st.info("No active employees.")
+# =========================================================
+# CORRECTIONS
+# =========================================================
 
+def correction(employee_id=None):
+
+    st.subheader("✏️ Correction Request")
+
+    employees = execute(
+        "SELECT id,name FROM employees",
+        fetch=True
+    )
+
+    if not employees:
+        return
+
+    if employee_id:
+        selected = employee_id
     else:
-
-        choices = {
-            f"{e['name']} — {e['uan']}": i
-            for i, e in active
-        }
-
         selected = st.selectbox(
             "Employee",
-            list(choices.keys()),
-        )
+            [(x[0],x[1]) for x in employees],
+            format_func=lambda x:x[1]
+        )[0]
 
-        idx = choices[selected]
-
-        emp = st.session_state.employees[idx]
-
-        exit_date = st.date_input(
-            "Date of Exit",
-            date.today(),
-        )
-
-        reason = st.selectbox(
-            "Reason",
-            [
-                "Cessation of employment",
-                "Superannuation",
-                "Death",
-                "Permanent disablement",
-                "Other",
-            ],
-        )
-
-        if st.button(
-            "Mark Exit — DEMO",
-            type="primary",
-        ):
-
-            emp["doe"] = str(exit_date)
-            emp["reason"] = reason
-            emp["status"] = "Exited"
-
-            add_log(
-                f"Employee exit marked: {emp['name']}"
-            )
-
-            st.success(
-                f"{emp['name']} marked as exited."
-            )
-
-
-# ============================================================
-# 13. Transfer / Previous Employment
-# ============================================================
-
-elif menu == "1️⃣3️⃣ Transfer / Previous Employment":
-
-    st.subheader(
-        "Transfer / Previous Employment — Demo"
+    field = st.selectbox(
+        "Correction Type",
+        [
+            "Name",
+            "DOB",
+            "Gender",
+            "Father/Spouse Name",
+            "DOJ",
+            "DOE",
+            "UAN",
+            "Wage"
+        ]
     )
 
-    uan = st.text_input(
-        "UAN",
-        "100000000001",
-    )
+    old = st.text_input("Old Value")
+    new = st.text_input("New Value")
+    reason = st.text_area("Reason")
 
-    previous_member = st.text_input(
-        "Previous Member ID",
-        "DLCPM000000000001",
-    )
+    if st.button("Submit Correction"):
 
-    current_member = st.text_input(
-        "Current Member ID",
-        company["code"] + "00000003",
-    )
+        execute("""
+            INSERT INTO corrections
+            (employee_id,field_name,old_value,
+             new_value,reason,status,created_at)
+            VALUES(?,?,?,?,?,'Pending',?)
+        """,(
+            selected,
+            field,
+            old,
+            new,
+            reason,
+            datetime.now().isoformat()
+        ))
 
-    if st.button("Check Employment History"):
-
-        found = next(
-            (
-                e
-                for e in st.session_state.employees
-                if e["uan"] == uan
-            ),
-            None,
+        log_action(
+            f"Correction request: {field}",
+            "Corrections"
         )
 
-        if found:
+        st.success("Correction request submitted — DEMO.")
 
-            st.success(
-                f"Employee found: {found['name']}"
-            )
+
+# =========================================================
+# APPROVALS
+# =========================================================
+
+def approvals():
+
+    st.subheader("Pending Approvals")
+
+    tabs = st.tabs([
+        "KYC",
+        "Corrections",
+        "All"
+    ])
+
+    with tabs[0]:
+
+        rows = execute("""
+            SELECT k.id,e.name,e.uan,k.status
+            FROM kyc k
+            JOIN employees e ON e.id=k.employee_id
+            WHERE k.status='Pending'
+        """,fetch=True)
+
+        for x in rows:
 
             st.write(
-                f"Previous Member ID: {previous_member}"
+                f"{x[1]} | {x[2]} | {x[3]}"
             )
+
+            c1,c2 = st.columns(2)
+
+            if c1.button(
+                "Approve",
+                key=f"approve{x[0]}"
+            ):
+                execute(
+                    "UPDATE kyc SET status='Approved' WHERE id=?",
+                    (x[0],)
+                )
+                log_action(
+                    "Approve KYC",
+                    "Approvals"
+                )
+                st.rerun()
+
+            if c2.button(
+                "Reject",
+                key=f"reject{x[0]}"
+            ):
+                execute(
+                    "UPDATE kyc SET status='Rejected' WHERE id=?",
+                    (x[0],)
+                )
+                log_action(
+                    "Reject KYC",
+                    "Approvals"
+                )
+                st.rerun()
+
+    with tabs[1]:
+
+        rows = execute("""
+            SELECT id,employee_id,field_name,
+                   old_value,new_value,reason,status
+            FROM corrections
+            WHERE status='Pending'
+        """,fetch=True)
+
+        for x in rows:
 
             st.write(
-                f"Current Member ID: {current_member}"
+                f"Request #{x[0]} | "
+                f"{x[2]} | "
+                f"{x[3]} → {x[4]}"
             )
 
-        else:
-            st.warning(
-                "UAN not found in demo database."
-            )
-
-    if st.button("Simulate Transfer Request"):
-
-        add_log(
-            f"Demo transfer request created for UAN {uan}"
-        )
-
-        st.success(
-            "Demo transfer request created."
-        )
-
-
-# ============================================================
-# 14. Online Services
-# ============================================================
-
-elif menu == "1️⃣4️⃣ Online Services":
-
-    st.subheader("Online Services")
-
-    services = [
-        "Employer Profile",
-        "Member Management",
-        "KYC Management",
-        "UAN Services",
-        "ECR Filing",
-        "Challan",
-        "Payment Status",
-        "Member Exit",
-        "Transfer / Employment History",
-        "Correction Request",
-        "Compliance Services",
-        "Reports",
-    ]
-
-    for service in services:
-
-        if st.button(
-            service,
-            use_container_width=True,
-        ):
-
-            add_log(
-                f"Opened demo service: {service}"
-            )
-
-            st.success(
-                f"{service} demo opened."
-            )
-
-
-# ============================================================
-# 15. Compliance Dashboard
-# ============================================================
-
-elif menu == "1️⃣5️⃣ Compliance Dashboard":
-
-    st.subheader("Compliance Dashboard")
-
-    total_employees = len(
-        st.session_state.employees
-    )
-
-    active_employees = len(
-        [
-            e
-            for e in st.session_state.employees
-            if e["status"] == "Active"
-        ]
-    )
-
-    kyc_pending = len(
-        [
-            e
-            for e in st.session_state.employees
-            if e["kyc"] == "Pending"
-        ]
-    )
-
-    c1, c2, c3 = st.columns(3)
-
-    c1.metric(
-        "Total Members",
-        total_employees,
-    )
-
-    c2.metric(
-        "Active Members",
-        active_employees,
-    )
-
-    c3.metric(
-        "KYC Pending",
-        kyc_pending,
-    )
-
-    st.write("### Compliance Checklist")
-
-    checks = [
-        ("Establishment Active", company["status"] == "Active"),
-        ("Employees Added", total_employees > 0),
-        ("KYC Review", kyc_pending == 0),
-        ("ECR Created", len(st.session_state.ecr) > 0),
-        ("Challan Generated", len(st.session_state.challans) > 0),
-    ]
-
-    for name, result in checks:
-
-        if result:
-            st.success(f"✅ {name}")
-        else:
-            st.warning(f"⚠️ {name}")
-
-
-# ============================================================
-# 16. Downloads
-# ============================================================
-
-elif menu == "1️⃣6️⃣ Downloads":
-
-    st.subheader("Downloads")
-
-    df = employee_dataframe()
-
-    if not df.empty:
-
-        st.download_button(
-            "⬇️ Download Employee Report",
-            data=csv_download(df),
-            file_name="employee_report_demo.csv",
-            mime="text/csv",
-        )
-
-    if st.session_state.ecr:
-
-        ecr_df = pd.DataFrame(
-            st.session_state.ecr
-        )
-
-        st.download_button(
-            "⬇️ Download ECR Summary",
-            data=csv_download(ecr_df),
-            file_name="ecr_summary_demo.csv",
-            mime="text/csv",
-        )
-
-    if st.session_state.challans:
-
-        challan_df = pd.DataFrame(
-            st.session_state.challans
-        )
-
-        st.download_button(
-            "⬇️ Download Challan Report",
-            data=csv_download(challan_df),
-            file_name="challan_report_demo.csv",
-            mime="text/csv",
-        )
-
-    if st.session_state.logs:
-
-        logs_df = pd.DataFrame(
-            st.session_state.logs
-        )
-
-        st.download_button(
-            "⬇️ Download Activity Log",
-            data=csv_download(logs_df),
-            file_name="activity_log_demo.csv",
-            mime="text/csv",
-        )
-
-
-# ============================================================
-# 17. Reports
-# ============================================================
-
-elif menu == "1️⃣7️⃣ Reports":
-
-    st.subheader("Reports")
-
-    report_type = st.selectbox(
-        "Report",
-        [
-            "Member-wise Report",
-            "Monthly Contribution",
-            "Challan / TRRN",
-            "Payment Reconciliation",
-            "UAN Report",
-            "Establishment Report",
-        ],
-    )
-
-    if report_type == "Member-wise Report":
-
-        df = employee_dataframe()
-
-        st.dataframe(
-            df,
-            use_container_width=True,
-            hide_index=True,
-        )
-
-    elif report_type == "Monthly Contribution":
-
-        rows = []
-
-        for e in st.session_state.employees:
-
-            c = calc_contribution(e["basic"])
-
-            rows.append(
-                {
-                    "Employee": e["name"],
-                    "UAN": e["uan"],
-                    "Employee Share": c["employee"],
-                    "Employer EPF": c["employer_epf"],
-                    "EPS": c["eps"],
-                    "EDLI": c["edli"],
-                }
-            )
-
-        st.dataframe(
-            pd.DataFrame(rows),
-            use_container_width=True,
-            hide_index=True,
-        )
-
-    elif report_type == "Challan / TRRN":
-
-        if st.session_state.challans:
-            st.dataframe(
-                pd.DataFrame(
-                    st.session_state.challans
-                ),
-                use_container_width=True,
-                hide_index=True,
-            )
-        else:
-            st.info("No challans.")
-
-    elif report_type == "Payment Reconciliation":
-
-        if st.session_state.challans:
-
-            rows = []
-
-            for c in st.session_state.challans:
-
-                rows.append(
-                    {
-                        "TRRN": c["trrn"],
-                        "Challan": c["challan_no"],
-                        "Amount": c["amount"],
-                        "Status": c["status"],
-                    }
+            if st.button(
+                "Approve Correction",
+                key=f"corr{x[0]}"
+            ):
+
+                execute("""
+                    UPDATE corrections
+                    SET status='Approved'
+                    WHERE id=?
+                """,(x[0],))
+
+                log_action(
+                    f"Approve correction {x[0]}",
+                    "Approvals"
                 )
-
-            st.dataframe(
-                pd.DataFrame(rows),
-                use_container_width=True,
-                hide_index=True,
-            )
-
-        else:
-            st.info("No payment records.")
-
-    elif report_type == "UAN Report":
-
-        rows = [
-            {
-                "Name": e["name"],
-                "UAN": e["uan"],
-                "Member ID": e["member_id"],
-                "Status": e["status"],
-            }
-            for e in st.session_state.employees
-        ]
-
-        st.dataframe(
-            pd.DataFrame(rows),
-            use_container_width=True,
-            hide_index=True,
-        )
-
-    else:
-
-        st.json(
-            {
-                "Establishment": company,
-                "Employee Count":
-                    len(st.session_state.employees),
-                "ECR Count":
-                    len(st.session_state.ecr),
-                "Challan Count":
-                    len(st.session_state.challans),
-            }
-        )
-
-
-# ============================================================
-# 18. Corrections
-# ============================================================
-
-elif menu == "1️⃣8️⃣ Corrections":
-
-    st.subheader("Correction Request — Demo")
-
-    employees = st.session_state.employees
-
-    if employees:
-
-        choices = {
-            f"{e['name']} — {e['uan']}": i
-            for i, e in enumerate(employees)
-        }
-
-        selected = st.selectbox(
-            "Employee",
-            list(choices.keys()),
-        )
-
-        idx = choices[selected]
-
-        correction_type = st.selectbox(
-            "Correction Type",
-            [
-                "Employee Name",
-                "Date of Birth",
-                "Father / Spouse Name",
-                "Aadhaar / KYC",
-                "UAN",
-                "Date of Joining",
-                "Date of Exit",
-                "Wages / Contribution",
-                "Employer Profile",
-            ],
-        )
-
-        old_value = st.text_input(
-            "Existing Value"
-        )
-
-        new_value = st.text_input(
-            "Requested Value"
-        )
-
-        reason = st.text_area(
-            "Reason for Correction"
-        )
-
-        if st.button(
-            "Submit Correction Request",
-            type="primary",
-        ):
-
-            request_id = (
-                "CORR-"
-                + "".join(
-                    random.choices(
-                        string.digits,
-                        k=8,
-                    )
-                )
-            )
-
-            st.session_state.corrections.append(
-                {
-                    "request_id": request_id,
-                    "employee": employees[idx]["name"],
-                    "type": correction_type,
-                    "old": old_value,
-                    "new": new_value,
-                    "reason": reason,
-                    "status": "Pending Approval",
-                    "date": datetime.now().strftime(
-                        "%Y-%m-%d"
-                    ),
-                }
-            )
-
-            add_log(
-                f"Correction request created: {request_id}"
-            )
-
-            st.success(
-                f"Correction request created: {request_id}"
-            )
-
-    if st.session_state.corrections:
-
-        st.write("### Correction Requests")
-
-        st.dataframe(
-            pd.DataFrame(
-                st.session_state.corrections
-            ),
-            use_container_width=True,
-            hide_index=True,
-        )
-
-
-# ============================================================
-# 19. Notices / e-Proceedings
-# ============================================================
-
-elif menu == "1️⃣9️⃣ Notices / e-Proceedings":
-
-    st.subheader("Compliance Notices / e-Proceedings")
-
-    st.info(
-        "This is a simulated compliance module."
-    )
-
-    with st.form("notice"):
-
-        notice_type = st.selectbox(
-            "Notice Type",
-            [
-                "Contribution Default",
-                "Return Pending",
-                "KYC Issue",
-                "Wage Discrepancy",
-                "General Compliance",
-            ],
-        )
-
-        subject = st.text_input(
-            "Subject",
-            "Demo compliance notice",
-        )
-
-        details = st.text_area(
-            "Details",
-            "This is a simulated notice.",
-        )
-
-        if st.form_submit_button(
-            "Create Demo Notice"
-        ):
-
-            notice_id = (
-                "NOTICE-"
-                + "".join(
-                    random.choices(
-                        string.digits,
-                        k=8,
-                    )
-                )
-            )
-
-            st.session_state.notices.append(
-                {
-                    "notice_id": notice_id,
-                    "type": notice_type,
-                    "subject": subject,
-                    "details": details,
-                    "status": "Open",
-                    "date": date.today().isoformat(),
-                }
-            )
-
-            add_log(
-                f"Compliance notice created: {notice_id}"
-            )
-
-            st.success(
-                f"Notice {notice_id} created."
-            )
-
-    if st.session_state.notices:
-
-        st.write("### Notices")
-
-        st.dataframe(
-            pd.DataFrame(
-                st.session_state.notices
-            ),
-            use_container_width=True,
-            hide_index=True,
-        )
-
-        notice_options = {
-            n["notice_id"]: n
-            for n in st.session_state.notices
-        }
-
-        selected_notice = st.selectbox(
-            "Select Notice",
-            list(notice_options.keys()),
-        )
-
-        if st.button("Submit Demo Response"):
-
-            notice_options[selected_notice][
-                "status"
-            ] = "Response Submitted"
-
-            add_log(
-                f"Response submitted: {selected_notice}"
-            )
-
-            st.success(
-                "Demo response submitted."
-            )
-
-
-# ============================================================
-# 20. Special Modules
-# ============================================================
-
-elif menu == "2️⃣0️⃣ Special Modules":
-
-    st.subheader("Special Modules")
-
-    module = st.selectbox(
-        "Module",
-        [
-            "ABRY — Demo",
-            "Exemption — Demo",
-            "Past Accumulation File Upload — Demo",
-            "International Worker — Demo",
-            "Other Establishment Services",
-        ],
-    )
-
-    if module == "Past Accumulation File Upload — Demo":
-
-        st.write(
-            "### Upload Demo File"
-        )
-
-        uploaded = st.file_uploader(
-            "Choose a CSV file",
-            type=["csv"],
-        )
-
-        if uploaded:
-
-            try:
-
-                df = pd.read_csv(uploaded)
 
                 st.success(
-                    "File loaded successfully."
+                    "Correction approved — DEMO."
                 )
+                st.rerun()
 
-                st.dataframe(
-                    df,
-                    use_container_width=True,
+    with tabs[2]:
+
+        st.write("All pending demo approval workflows are shown in their respective tabs.")
+
+
+# =========================================================
+# COMPLIANCE
+# =========================================================
+
+def compliance():
+
+    header("⚖️ Compliance / Notices")
+
+    tabs = st.tabs([
+        "Compliance",
+        "Notices",
+        "e-Proceedings — Demo"
+    ])
+
+    with tabs[0]:
+
+        ecr_pending = execute("""
+            SELECT COUNT(*)
+            FROM ecr
+            WHERE status!='Submitted'
+        """,fetch=True)[0][0]
+
+        unpaid = execute("""
+            SELECT COUNT(*)
+            FROM challans
+            WHERE status='Unpaid'
+        """,fetch=True)[0][0]
+
+        kyc_pending = execute("""
+            SELECT COUNT(*)
+            FROM kyc
+            WHERE status='Pending'
+        """,fetch=True)[0][0]
+
+        c1,c2,c3 = st.columns(3)
+
+        c1.metric("ECR Pending",ecr_pending)
+        c2.metric("Unpaid Challan",unpaid)
+        c3.metric("KYC Pending",kyc_pending)
+
+    with tabs[1]:
+
+        rows = execute("""
+            SELECT id,title,description,
+                   due_date,status,response
+            FROM notices
+            ORDER BY id DESC
+        """,fetch=True)
+
+        if not rows:
+            st.info("No notices in demo.")
+
+        for x in rows:
+
+            with st.expander(
+                f"{x[1]} | {x[4]}"
+            ):
+
+                st.write(x[2])
+                st.write("Due:",x[3])
+
+                response = st.text_area(
+                    "Employer Response",
+                    key=f"response{x[0]}"
                 )
 
                 if st.button(
-                    "Validate Demo File"
+                    "Submit Response",
+                    key=f"notice{x[0]}"
                 ):
 
-                    st.success(
-                        "Demo file validation successful."
+                    execute("""
+                        UPDATE notices
+                        SET response=?,status='Response Submitted'
+                        WHERE id=?
+                    """,(response,x[0]))
+
+                    log_action(
+                        "Notice response submitted",
+                        "Compliance"
                     )
 
-            except Exception as ex:
+                    st.success("Response submitted — DEMO.")
+                    st.rerun()
 
-                st.error(
-                    f"Could not read file: {ex}"
-                )
+    with tabs[2]:
 
-    elif module == "International Worker — Demo":
+        st.info(
+            "This is a simulated e-Proceedings training workflow."
+        )
+
+        st.selectbox(
+            "Proceeding Status",
+            [
+                "Open",
+                "Response Pending",
+                "Response Submitted",
+                "Under Review",
+                "Closed"
+            ]
+        )
+
+
+# =========================================================
+# REPORTS
+# =========================================================
+
+def reports():
+
+    header("📈 Reports")
+
+    report = st.selectbox(
+        "Report",
+        [
+            "Employee Report",
+            "UAN Report",
+            "KYC Report",
+            "Payroll Report",
+            "Contribution Report",
+            "ECR Report",
+            "Challan Report",
+            "Payment Report",
+            "Exit Report",
+            "Correction Report",
+            "Audit Report"
+        ]
+    )
+
+    if report == "Employee Report":
+        rows = execute("""
+            SELECT member_id,uan,name,doj,doe,status
+            FROM employees
+        """,fetch=True)
+
+        df = pd.DataFrame(
+            rows,
+            columns=[
+                "Member ID","UAN","Name",
+                "DOJ","DOE","Status"
+            ]
+        )
+
+    elif report == "UAN Report":
+
+        rows = execute("""
+            SELECT name,uan,member_id,status
+            FROM employees
+        """,fetch=True)
+
+        df = pd.DataFrame(
+            rows,
+            columns=[
+                "Name","UAN",
+                "Member ID","Status"
+            ]
+        )
+
+    elif report == "KYC Report":
+
+        rows = execute("""
+            SELECT e.name,e.uan,
+                   k.aadhaar,k.pan,
+                   k.bank,k.status
+            FROM kyc k
+            JOIN employees e ON e.id=k.employee_id
+        """,fetch=True)
+
+        df = pd.DataFrame(
+            rows,
+            columns=[
+                "Name","UAN","Aadhaar",
+                "PAN","Bank","Status"
+            ]
+        )
+
+    elif report == "Payroll Report":
+
+        rows = execute("""
+            SELECT e.name,p.month,p.basic,
+                   p.employee_share,
+                   p.employer_share
+            FROM payroll p
+            JOIN employees e ON e.id=p.employee_id
+        """,fetch=True)
+
+        df = pd.DataFrame(
+            rows,
+            columns=[
+                "Name","Month","Basic",
+                "Employee Share",
+                "Employer Share"
+            ]
+        )
+
+    elif report == "ECR Report":
+
+        rows = execute("""
+            SELECT id,month,members,
+                   amount,status,trrn
+            FROM ecr
+        """,fetch=True)
+
+        df = pd.DataFrame(
+            rows,
+            columns=[
+                "ID","Month","Members",
+                "Amount","Status","TRRN"
+            ]
+        )
+
+    elif report == "Challan Report":
+
+        rows = execute("""
+            SELECT trrn,amount,
+                   status,created_at
+            FROM challans
+        """,fetch=True)
+
+        df = pd.DataFrame(
+            rows,
+            columns=[
+                "TRRN","Amount",
+                "Status","Created"
+            ]
+        )
+
+    elif report == "Payment Report":
+
+        rows = execute("""
+            SELECT trrn,amount,
+                   payment_ref,status,created_at
+            FROM payments
+        """,fetch=True)
+
+        df = pd.DataFrame(
+            rows,
+            columns=[
+                "TRRN","Amount",
+                "Payment Ref",
+                "Status","Created"
+            ]
+        )
+
+    elif report == "Exit Report":
+
+        rows = execute("""
+            SELECT name,uan,doj,doe,
+                   exit_reason,status
+            FROM employees
+            WHERE doe IS NOT NULL
+        """,fetch=True)
+
+        df = pd.DataFrame(
+            rows,
+            columns=[
+                "Name","UAN","DOJ",
+                "DOE","Reason","Status"
+            ]
+        )
+
+    elif report == "Correction Report":
+
+        rows = execute("""
+            SELECT id,employee_id,
+                   field_name,old_value,
+                   new_value,status,created_at
+            FROM corrections
+        """,fetch=True)
+
+        df = pd.DataFrame(
+            rows,
+            columns=[
+                "ID","Employee","Field",
+                "Old","New","Status","Created"
+            ]
+        )
+
+    elif report == "Audit Report":
+
+        rows = execute("""
+            SELECT username,action,
+                   module,created_at
+            FROM audit_logs
+            ORDER BY id DESC
+        """,fetch=True)
+
+        df = pd.DataFrame(
+            rows,
+            columns=[
+                "User","Action",
+                "Module","Created"
+            ]
+        )
+
+    else:
+
+        rows = execute("""
+            SELECT e.name,p.month,
+                   p.employee_share,
+                   p.employer_share,
+                   p.eps_share,
+                   p.edli_share
+            FROM payroll p
+            JOIN employees e ON e.id=p.employee_id
+        """,fetch=True)
+
+        df = pd.DataFrame(
+            rows,
+            columns=[
+                "Name","Month",
+                "Employee Share",
+                "Employer Share",
+                "EPS","EDLI"
+            ]
+        )
+
+    st.dataframe(
+        df,
+        use_container_width=True,
+        hide_index=True
+    )
+
+    if not df.empty:
+
+        csv = df.to_csv(index=False)
+
+        st.download_button(
+            "⬇️ Download CSV",
+            csv,
+            "demo_report.csv",
+            "text/csv"
+        )
+
+
+# =========================================================
+# DOWNLOADS
+# =========================================================
+
+def downloads():
+
+    header("📥 Downloads")
+
+    st.write("Generate demo files:")
+
+    reports_list = [
+        "Employee List",
+        "UAN List",
+        "KYC Report",
+        "Payroll Report",
+        "ECR Report",
+        "Challan Report",
+        "Payment Report"
+    ]
+
+    for r in reports_list:
+
+        if st.button(
+            f"Generate {r}",
+            key=r
+        ):
+
+            rows = execute(
+                "SELECT * FROM employees",
+                fetch=True
+            )
+
+            df = pd.DataFrame(rows)
+
+            st.download_button(
+                f"Download {r}",
+                df.to_csv(index=False),
+                f"{r.lower().replace(' ','_')}.csv",
+                "text/csv",
+                key=f"download_{r}"
+            )
+
+
+# =========================================================
+# NOTIFICATIONS
+# =========================================================
+
+def notifications():
+
+    header("🔔 Notifications")
+
+    rows = execute("""
+        SELECT id,message,status,created_at
+        FROM notifications
+        ORDER BY id DESC
+    """,fetch=True)
+
+    if not rows:
+        st.info("No notifications.")
+        return
+
+    for x in rows:
+
+        if x[2] == "Unread":
+            st.warning(x[1])
+        else:
+            st.info(x[1])
+
+        if st.button(
+            "Mark Read",
+            key=f"read{x[0]}"
+        ):
+
+            execute(
+                "UPDATE notifications SET status='Read' WHERE id=?",
+                (x[0],)
+            )
+
+            st.rerun()
+
+
+# =========================================================
+# AUDIT
+# =========================================================
+
+def audit():
+
+    header("📜 Audit Trail")
+
+    rows = execute("""
+        SELECT username,action,
+               module,created_at
+        FROM audit_logs
+        ORDER BY id DESC
+    """,fetch=True)
+
+    st.dataframe(
+        pd.DataFrame(
+            rows,
+            columns=[
+                "User","Action",
+                "Module","Date/Time"
+            ]
+        ),
+        use_container_width=True,
+        hide_index=True
+    )
+
+
+# =========================================================
+# USER / ADMIN
+# =========================================================
+
+def user_admin():
+
+    header("👤 User / Admin")
+
+    tabs = st.tabs([
+        "My Profile",
+        "Users",
+        "Roles",
+        "Settings"
+    ])
+
+    with tabs[0]:
 
         st.write(
-            "International Worker information"
+            "**Username:**",
+            st.session_state.get(
+                "username",
+                "demoemployer"
+            )
         )
 
-        passport = st.text_input(
-            "Demo Passport Number"
+        st.write(
+            "**Role:**",
+            st.session_state.get(
+                "role",
+                "Employer"
+            )
         )
 
-        country = st.selectbox(
-            "Country",
-            [
-                "United States",
-                "United Kingdom",
-                "Singapore",
-                "UAE",
-                "Other",
-            ],
+    with tabs[1]:
+
+        rows = execute("""
+            SELECT username,role,active
+            FROM users
+        """,fetch=True)
+
+        st.dataframe(
+            pd.DataFrame(
+                rows,
+                columns=[
+                    "Username",
+                    "Role",
+                    "Active"
+                ]
+            ),
+            use_container_width=True,
+            hide_index=True
         )
 
-        if st.button(
-            "Save International Worker — Demo"
-        ):
+    with tabs[2]:
 
-            add_log(
-                "International Worker demo record saved"
-            )
+        st.write("### Demo Roles")
 
-            st.success(
-                "Demo record saved."
-            )
+        st.write("""
+        - Employer
+        - HR
+        - Payroll Operator
+        - Compliance Officer
+        - Viewer
+        - Administrator
+        """)
 
-    elif module == "ABRY — Demo":
+    with tabs[3]:
 
-        st.info(
-            "ABRY module is represented here as a "
-            "training simulation only."
+        st.checkbox(
+            "Demo notifications",
+            value=True
         )
 
-        if st.button(
-            "Create ABRY Demo Application"
-        ):
-
-            add_log(
-                "ABRY demo application created"
-            )
-
-            st.success(
-                "Demo ABRY application created."
-            )
-
-    elif module == "Exemption — Demo":
-
-        st.info(
-            "Exemption functionality is simulated."
+        st.checkbox(
+            "Audit logging",
+            value=True
         )
 
-        if st.button(
-            "Create Exemption Demo Request"
-        ):
 
-            add_log(
-                "Exemption demo request created"
+# =========================================================
+# SPECIAL MODULES
+# =========================================================
+
+def special_modules():
+
+    header("⭐ Special Modules")
+
+    module = st.selectbox(
+        "Select Module",
+        [
+            "ABRY — Demo",
+            "Exemption — Demo",
+            "Past Accumulation — Demo",
+            "International Workers — Demo"
+        ]
+    )
+
+    if module == "Past Accumulation — Demo":
+
+        file = st.file_uploader(
+            "Upload CSV",
+            type=["csv"]
+        )
+
+        if file:
+            df = pd.read_csv(file)
+
+            st.dataframe(
+                df,
+                use_container_width=True
             )
 
-            st.success(
-                "Demo exemption request created."
-            )
+            if st.button("Validate Upload"):
+                st.success(
+                    f"{len(df)} rows validated — DEMO."
+                )
 
     else:
 
         st.info(
-            "Additional establishment-specific "
-            "services can be represented here."
+            f"{module} is available as a simulated training module."
         )
 
+        if st.button("Create Demo Application"):
+            st.success(
+                "Demo application created."
+            )
 
-# ============================================================
-# Settings / Reset
-# ============================================================
 
-elif menu == "⚙️ Settings / Reset":
+# =========================================================
+# MAIN MENU
+# =========================================================
 
-    st.subheader("Demo Settings")
+def main():
 
-    st.warning(
-        "Resetting the demo deletes all changes made "
-        "during this Streamlit session."
+    init_db()
+
+    if not st.session_state.get("logged",False):
+        login()
+        return
+
+    st.set_page_config(
+        page_title="EPFO Employer Training Demo",
+        page_icon="🏢",
+        layout="wide",
+        initial_sidebar_state="expanded"
     )
 
-    if st.button(
-        "🗑️ Reset Demo Data",
-        type="primary",
-    ):
+    st.sidebar.markdown(
+        """
+        # 🏢 EPFO Employer
+        ### TRAINING DEMO
+        """
+    )
 
-        for key in list(st.session_state.keys()):
-            del st.session_state[key]
+    st.sidebar.warning(
+        "DEMO ONLY — Not official EPFO"
+    )
 
+    st.sidebar.divider()
+
+    menu = st.sidebar.radio(
+        "MAIN MENU",
+        [
+            "🏠 Dashboard",
+            "🏢 Establishment",
+            "👥 Member",
+            "🪪 KYC",
+            "💰 Payroll",
+            "📄 ECR / Return Filing",
+            "🧾 Challan / Payment",
+            "🚪 Employee Exit",
+            "✏️ Corrections",
+            "⚖️ Compliance",
+            "📈 Reports",
+            "📥 Downloads",
+            "🔔 Notifications",
+            "📜 Audit Trail",
+            "👤 User / Admin",
+            "⭐ Special Modules"
+        ]
+    )
+
+    st.sidebar.divider()
+
+    if st.sidebar.button("🚪 Logout"):
+        log_action("Logout","Authentication")
+        st.session_state.clear()
         st.rerun()
 
-    st.divider()
+    if menu == "🏠 Dashboard":
+        dashboard()
 
-    st.write("### Demo Information")
+    elif menu == "🏢 Establishment":
+        establishment()
 
-    st.write(
-        """
-        **Login**
+    elif menu == "👥 Member":
+        members()
 
-        User ID: `DEMOEMP001`
+    elif menu == "🪪 KYC":
+        kyc()
 
-        Password: `demo123`
+    elif menu == "💰 Payroll":
+        payroll()
 
-        Captcha: `DEMO`
+    elif menu == "📄 ECR / Return Filing":
+        ecr()
 
-        **Demo Establishment**
+    elif menu == "🧾 Challan / Payment":
+        challan_payment()
 
-        ABC Technologies Pvt. Ltd.
+    elif menu == "🚪 Employee Exit":
+        exit_module()
 
-        **Demo Establishment Code**
+    elif menu == "✏️ Corrections":
+        correction()
 
-        DLCPM0001234000
-        """
-    )
+    elif menu == "⚖️ Compliance":
+        compliance()
+
+    elif menu == "📈 Reports":
+        reports()
+
+    elif menu == "📥 Downloads":
+        downloads()
+
+    elif menu == "🔔 Notifications":
+        notifications()
+
+    elif menu == "📜 Audit Trail":
+        audit()
+
+    elif menu == "👤 User / Admin":
+        user_admin()
+
+    elif menu == "⭐ Special Modules":
+        special_modules()
 
 
-# ============================================================
-# Footer
-# ============================================================
-
-st.divider()
-
-st.caption(
-    "EPFO Employer Portal — Training Demo | "
-    "Not an official EPFO application | "
-    "No real credentials, OTP, Aadhaar, PAN or payment data should be entered."
-)
+if __name__ == "__main__":
+    main()
